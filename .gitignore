@@ -1,0 +1,12 @@
+# Your real data and generated artifacts are NOT committed.
+# The repo ships state.example.json; on first run it is copied to state.json.
+state.json
+state.json.bak
+snapshot.md
+dashboard.html
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

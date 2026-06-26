@@ -1,0 +1,20 @@
+name: evals
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: seed example data
+        run: cp state.example.json state.json
+      - name: core eval (drift=0, HITL gate, token reduction)
+        run: python eval.py
+      - name: dashboard invariants
+        run: python eval_dashboard.py

@@ -1,0 +1,64 @@
+{
+  "projects": [
+    {
+      "id": "proj-rag",
+      "name": "RAG quality loop",
+      "north_star": "Build a loop that measures and improves RAG answer quality",
+      "priority": "high",
+      "repo": "rag/",
+      "depends_on": [],
+      "done_def": "A score-over-time chart is demoable",
+      "phases": [
+        { "name": "Phase 0 eval loop", "goal": "a measure -> improve loop", "status": "done" },
+        { "name": "Phase 1 hybrid search", "goal": "vector + keyword, larger golden set", "status": "todo" },
+        { "name": "Phase 2 ops", "goal": "score chart + live demo", "status": "todo" }
+      ],
+      "milestones": [
+        { "name": "score chart public", "due": "2026-07-15", "status": "todo" }
+      ],
+      "tasks": [
+        { "id": "t1", "desc": "grow the golden set 6 -> 25", "status": "done", "owner": "human" },
+        { "id": "t2", "desc": "validate the judge against human labels", "status": "todo", "owner": "human", "priority": "high" },
+        { "id": "t3", "desc": "implement DuckDB hybrid search", "status": "todo", "owner": "human" },
+        { "id": "t4", "desc": "draft a blog post about the eval loop", "status": "proposed", "owner": "ai" }
+      ]
+    },
+    {
+      "id": "proj-web",
+      "name": "Personal website",
+      "north_star": "Ship a simple personal site",
+      "priority": "mid",
+      "repo": "site/",
+      "depends_on": [],
+      "done_def": "Site is live with an about + projects page",
+      "phases": [
+        { "name": "Phase 0 design", "goal": "layout + content outline", "status": "done" },
+        { "name": "Phase 1 build", "goal": "static site deployed", "status": "todo" }
+      ],
+      "milestones": [],
+      "tasks": [
+        { "id": "t5", "desc": "pick a static-site generator", "status": "todo", "owner": "human" },
+        { "id": "t6", "desc": "write the about page", "status": "todo", "owner": "human" }
+      ],
+      "focus_until": "2026-12-31"
+    },
+    {
+      "id": "proj-pipe",
+      "name": "Data pipeline",
+      "north_star": "A daily ETL that feeds the warehouse",
+      "priority": "low",
+      "repo": "pipeline/",
+      "depends_on": ["proj-rag"],
+      "done_def": "A nightly job loads clean tables",
+      "phases": [
+        { "name": "Phase 0 spec", "goal": "sources + target schema", "status": "todo" },
+        { "name": "Phase 1 build", "goal": "scheduled job", "status": "todo" },
+        { "name": "Phase 2 monitor", "goal": "alerts on failure", "status": "todo" }
+      ],
+      "milestones": [],
+      "tasks": [
+        { "id": "t7", "desc": "choose orchestration (cron vs Airflow)", "status": "todo", "owner": "human" }
+      ]
+    }
+  ]
+}
