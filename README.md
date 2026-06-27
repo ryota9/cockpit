@@ -6,7 +6,9 @@ drift, without burning tokens, and without letting the agent silently change the
 
 No dependencies. If Python runs, this runs.
 
-<!-- ![evals](https://github.com/<your-username>/cockpit/actions/workflows/ci.yml/badge.svg) -->
+![evals](https://github.com/ryota9/cockpit/actions/workflows/ci.yml/badge.svg)
+
+![Cockpit demo](demo.gif)
 
 ---
 
