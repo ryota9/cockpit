@@ -14,14 +14,36 @@
         { "name": "Phase 2 ops", "goal": "score chart + live demo", "status": "todo" }
       ],
       "milestones": [
-        { "name": "score chart public", "due": "2026-07-15", "status": "todo" }
+        { "name": "score chart public", "due": "2027-03-15", "status": "todo" }
       ],
       "tasks": [
         { "id": "t1", "desc": "grow the golden set 6 -> 25", "status": "done", "owner": "human" },
         { "id": "t2", "desc": "validate the judge against human labels", "status": "todo", "owner": "human", "priority": "high" },
         { "id": "t3", "desc": "implement DuckDB hybrid search", "status": "todo", "owner": "human" },
         { "id": "t4", "desc": "draft a blog post about the eval loop", "status": "proposed", "owner": "ai" }
-      ]
+      ],
+      "focus_until": "2027-12-31"
+    },
+    {
+      "id": "proj-agent",
+      "name": "Multi-agent review",
+      "north_star": "Worker/Judge multi-agent code review on every PR",
+      "priority": "high",
+      "repo": "agent-review/",
+      "depends_on": [],
+      "done_def": "PRs get an automated review comment",
+      "phases": [
+        { "name": "Phase 0 prototype", "goal": "worker + judge separation", "status": "done" },
+        { "name": "Phase 1 GitHub Action", "goal": "auto-review on PR", "status": "todo" },
+        { "name": "Phase 2 tuning", "goal": "precision/recall calibration", "status": "todo" }
+      ],
+      "milestones": [],
+      "tasks": [
+        { "id": "t5", "desc": "prototype worker + judge split", "status": "done", "owner": "human" },
+        { "id": "t6", "desc": "wire up GitHub Actions", "status": "todo", "owner": "human" },
+        { "id": "t7", "desc": "add a cost-per-review metric", "status": "proposed", "owner": "ai" }
+      ],
+      "focus_until": "2027-12-31"
     },
     {
       "id": "proj-web",
@@ -35,18 +57,19 @@
         { "name": "Phase 0 design", "goal": "layout + content outline", "status": "done" },
         { "name": "Phase 1 build", "goal": "static site deployed", "status": "todo" }
       ],
-      "milestones": [],
-      "tasks": [
-        { "id": "t5", "desc": "pick a static-site generator", "status": "todo", "owner": "human" },
-        { "id": "t6", "desc": "write the about page", "status": "todo", "owner": "human" }
+      "milestones": [
+        { "name": "launch", "due": "2027-02-01", "status": "todo" }
       ],
-      "focus_until": "2026-12-31"
+      "tasks": [
+        { "id": "t8", "desc": "pick a static-site generator", "status": "todo", "owner": "human" },
+        { "id": "t9", "desc": "write the about page", "status": "todo", "owner": "human" }
+      ]
     },
     {
-      "id": "proj-pipe",
+      "id": "proj-pipeline",
       "name": "Data pipeline",
       "north_star": "A daily ETL that feeds the warehouse",
-      "priority": "low",
+      "priority": "mid",
       "repo": "pipeline/",
       "depends_on": ["proj-rag"],
       "done_def": "A nightly job loads clean tables",
@@ -57,7 +80,42 @@
       ],
       "milestones": [],
       "tasks": [
-        { "id": "t7", "desc": "choose orchestration (cron vs Airflow)", "status": "todo", "owner": "human" }
+        { "id": "t10", "desc": "choose orchestration (cron vs Airflow)", "status": "todo", "owner": "human" }
+      ]
+    },
+    {
+      "id": "proj-cli",
+      "name": "Notes CLI",
+      "north_star": "A handy CLI for daily notes",
+      "priority": "low",
+      "repo": "notes-cli/",
+      "depends_on": [],
+      "done_def": "Installable via pipx with 3 commands",
+      "phases": [
+        { "name": "Phase 0 MVP", "goal": "add / list / search", "status": "done" },
+        { "name": "Phase 1 polish", "goal": "packaging + docs", "status": "todo" }
+      ],
+      "milestones": [],
+      "tasks": [
+        { "id": "t11", "desc": "add a full-text search command", "status": "todo", "owner": "human" }
+      ]
+    },
+    {
+      "id": "proj-mobile",
+      "name": "Proximity game PoC",
+      "north_star": "A proximity-based mobile game proof of concept",
+      "priority": "low",
+      "repo": "proximity-poc/",
+      "depends_on": [],
+      "done_def": "Two phones detect proximity in a PoC",
+      "phases": [
+        { "name": "Phase 0 design", "goal": "game + capture rules", "status": "done" },
+        { "name": "Phase 1 BLE PoC", "goal": "proximity capture works", "status": "done" },
+        { "name": "Phase 2 playable", "goal": "a minimal playable loop", "status": "todo" }
+      ],
+      "milestones": [],
+      "tasks": [
+        { "id": "t12", "desc": "build a minimal playable loop", "status": "todo", "owner": "human" }
       ]
     }
   ]

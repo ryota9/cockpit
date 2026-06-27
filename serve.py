@@ -29,7 +29,8 @@ ACTIONS = {
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        html = cockpit.render_dashboard(cockpit.load_state(), served=True)
+        pg = parse_qs(urlparse(self.path).query).get("pg", ["now"])[0]   # open the tab the action returned to
+        html = cockpit.render_dashboard(cockpit.load_state(), served=True, active=pg)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
@@ -43,7 +44,7 @@ class Handler(BaseHTTPRequestHandler):
             ACTIONS[path](form)   # the deterministic adapter does save_state + emit_snapshot
         except (KeyError, ValueError, IndexError) as exc:
             print(f"! {path}: {exc}")
-        pg = "approve" if path in ("/approve", "/reject") else "projects"   # return to the right tab
+        pg = form.get("pg", ["now"])[0]   # each button says which tab to return to (stay put, no jump)
         self.send_response(303)
         self.send_header("Location", f"/?pg={pg}")
         self.end_headers()

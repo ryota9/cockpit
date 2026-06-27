@@ -378,7 +378,7 @@ def _dash_stats(state):
             "proposed": sum(t.get("status") == "proposed" for t in tk)}
 
 
-def render_dashboard(state, served=False) -> str:
+def render_dashboard(state, served=False, active="now") -> str:
     e = html.escape
     s = _dash_stats(state)
     sp = _sorted_projects(state)
@@ -407,7 +407,8 @@ def render_dashboard(state, served=False) -> str:
             if served and i == cur:
                 btn = (f'<form class="act-f" method="post" action="/set-phase">'
                        f'<input type="hidden" name="pid" value="{p["id"]}"><input type="hidden" name="idx" value="{i}">'
-                       f'<input type="hidden" name="status" value="done"><button class="btn ph">✅ Complete phase</button></form>')
+                       f'<input type="hidden" name="status" value="done"><input type="hidden" name="pg" value="projects">'
+                       f'<button class="btn ph">✅ Complete phase</button></form>')
             out.append(f'<div class="jstep {cls}">{mark} {e(ph.get("name",""))} — {e(ph.get("goal",""))}{here}{btn}</div>')
         out.append(f'<div class="jgoal">🏁 Goal: {e(p.get("done_def",""))}</div>')
         return "".join(out)
@@ -426,7 +427,7 @@ def render_dashboard(state, served=False) -> str:
             if served and t.get("status") == "todo":
                 b = (f'<form class="act-f" method="post" action="/set-status">'
                      f'<input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="status" value="done">'
-                     f'<button class="btn">Done</button></form>')
+                     f'<input type="hidden" name="pg" value="projects"><button class="btn">Done</button></form>')
             return (f'<div class="ti">[{t.get("status")}] {e(t["id"])}: {e(t["desc"])} '
                     f'{"🤖" if t.get("owner")=="ai" else "👤"} {b}</div>')
         ti = "".join(trow(t) for t in p.get("tasks", []))
@@ -470,8 +471,8 @@ def render_dashboard(state, served=False) -> str:
     if served:
         appr_items = "".join(
             f'<div class="apr"><div><b>{e(p["name"])}</b> <span class="id">{p["id"]}</span><br>{e(t["desc"])}</div><div>'
-            f'<form class="act-f" method="post" action="/approve"><input type="hidden" name="tid" value="{t["id"]}"><button class="btn ok">✅ Approve</button></form>'
-            f'<form class="act-f" method="post" action="/reject"><input type="hidden" name="tid" value="{t["id"]}"><button class="btn no">🗑 Reject</button></form>'
+            f'<form class="act-f" method="post" action="/approve"><input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="pg" value="approve"><button class="btn ok">✅ Approve</button></form>'
+            f'<form class="act-f" method="post" action="/reject"><input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="pg" value="approve"><button class="btn no">🗑 Reject</button></form>'
             f'</div></div>' for p, t in appr
         ) or '<div class="apr-empty">Nothing to approve 🎉</div>'
     else:
@@ -486,7 +487,7 @@ def render_dashboard(state, served=False) -> str:
     if served:
         work_items = "".join(
             f'<div class="apr work"><div><b>{e(p["name"])}</b> <span class="id">{p["id"]}</span><br>{e(t["desc"])}</div>'
-            f'<form class="act-f" method="post" action="/set-status"><input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="status" value="done"><button class="btn ok">Done</button></form>'
+            f'<form class="act-f" method="post" action="/set-status"><input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="status" value="done"><input type="hidden" name="pg" value="approve"><button class="btn ok">Done</button></form>'
             f'</div>' for p, t in work
         ) or '<div class="apr-empty">No tasks pending 🎉</div>'
     else:
@@ -564,14 +565,14 @@ def render_dashboard(state, served=False) -> str:
             '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Cockpit Dashboard</title>' + DASH_CSS + "</head>")
     body = (f'<body><div class="wrap">'
             f'<aside class="side"><div class="brand">🛰 Cockpit</div><nav class="nav">'
-            f'<a class="active" data-pg="now" href="#">🔥 Now</a>'
-            f'<a data-pg="projects" href="#">📋 Projects</a>'
-            f'<a data-pg="approve" href="#">🙋 Your turn{appr_badge}</a>'
-            f'<a data-pg="kpi" href="#">📊 KPI</a>'
-            f'<a data-pg="settings" href="#">⚙️ Settings</a></nav></aside>'
+            f'<a class="{"active" if active=="now" else ""}" data-pg="now" href="#">🔥 Now</a>'
+            f'<a class="{"active" if active=="projects" else ""}" data-pg="projects" href="#">📋 Projects</a>'
+            f'<a class="{"active" if active=="approve" else ""}" data-pg="approve" href="#">🙋 Your turn{appr_badge}</a>'
+            f'<a class="{"active" if active=="kpi" else ""}" data-pg="kpi" href="#">📊 KPI</a>'
+            f'<a class="{"active" if active=="settings" else ""}" data-pg="settings" href="#">⚙️ Settings</a></nav></aside>'
             f'<main class="main"><div class="head"><div><h1>Good morning 👋</h1>'
             f'<div class="date">{date.today()} · {s["projects"]} projects active</div></div></div>'
-            f'<section class="page active" id="pg-now"><div class="momentum">'
+            f'<section class="page{" active" if active=="now" else ""}" id="pg-now"><div class="momentum">'
             f'<div><div class="big">{s["projects"]}</div><div class="lbl">projects</div></div><div class="sep"></div>'
             f'<div><div class="big">{s["todo"]}</div><div class="lbl">todo</div></div><div class="sep"></div>'
             f'<div><div class="big">{s["done"]}</div><div class="lbl">done</div></div><div class="sep"></div>'
@@ -579,15 +580,15 @@ def render_dashboard(state, served=False) -> str:
             f'<div><div class="big">{s["proposed"]}</div><div class="lbl">to approve</div></div>'
             f'<div class="msg">{e(msg)}</div></div>'
             f'<div class="sectitle">🔥 Focus (next ~3 days)</div><div class="now">{nows}</div></section>'
-            f'<section class="page" id="pg-projects">'
+            f'<section class="page{" active" if active=="projects" else ""}" id="pg-projects">'
             f'<div class="sectitle">📋 All projects (by priority)</div><div class="grid">{cards}</div></section>'
-            f'<section class="page" id="pg-approve">'
+            f'<section class="page{" active" if active=="approve" else ""}" id="pg-approve">'
             f'<div class="sectitle">🟡 Awaiting approval (AI proposals → approve to send to the agent)</div>'
             f'<div class="apr-wrap">{appr_items}</div>'
             f'<div class="sectitle">✅ Your tasks (human work → mark done to clear)</div>'
             f'<div class="apr-wrap">{work_items}</div></section>'
-            f'<section class="page" id="pg-kpi">{kpi_html}</section>'
-            f'<section class="page" id="pg-settings">{set_html}</section>'
+            f'<section class="page{" active" if active=="kpi" else ""}" id="pg-kpi">{kpi_html}</section>'
+            f'<section class="page{" active" if active=="settings" else ""}" id="pg-settings">{set_html}</section>'
             f'<div id="ov" class="ov" onclick="if(event.target===this)closeModal()"><div class="modal"><button class="mx" onclick="closeModal()" title="close">×</button><div id="mbody"></div></div></div>'
             f'<div class="foot">Auto-generated from state.json (deterministic · ADR-0006). Regenerated on every change.</div>'
             f'</main></div>')
