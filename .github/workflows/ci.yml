@@ -18,3 +18,7 @@ jobs:
         run: python eval.py
       - name: dashboard invariants
         run: python eval_dashboard.py
+      - name: time metadata, journal, stale (H1)
+        run: python eval_h1.py
+      - name: themes (verification-first)
+        run: python eval_theme.py

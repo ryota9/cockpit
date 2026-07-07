@@ -4,9 +4,20 @@ state.json
 state.json.bak
 snapshot.md
 dashboard.html
+events.jsonl
 
 # Python
 __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Private integrations (Hub feeds) — personal wiring, never committed
+integrations.local.toml
+feeds/
+
+# Personal art assets (the code falls back gracefully when absent)
+bg-phoenix-*.jpg
+cockpit-logo-sidebar.png
+
+.DS_Store

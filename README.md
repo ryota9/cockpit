@@ -46,6 +46,8 @@ cockpit.py          # the tool (read/write the ledger via commands)
 serve.py            # optional: a tiny local server for 1-click approval in the browser
 eval.py             # self-test: drift=0, HITL gate, token reduction
 eval_dashboard.py   # self-test: invariants on the generated HTML
+eval_h1.py          # self-test: time metadata, journal, stale detection, backward compat
+eval_theme.py       # self-test: the 4 dashboard themes (verification-first)
 state.example.json  # sample data (copied to state.json on first run)
 DESIGN.md           # why it works this way
 
@@ -53,6 +55,7 @@ DESIGN.md           # why it works this way
 state.json          # ★ the source of truth
 snapshot.md         # what the agent reads (compact, read-only)
 dashboard.html      # what you look at
+events.jsonl        # append-only journal (what happened, when)
 ```
 
 Remember one thing: **`state.json` is the truth; `snapshot.md` and `dashboard.html` are outputs.**
@@ -136,10 +139,21 @@ python3 cockpit.py focus proj-1 5            # hot for 5 days  (unfocus to clear
 
 # agent proposes (only)
 python3 cockpit.py propose proj-1 "a task it suggests"
+python3 cockpit.py propose proj-1 "a task" --why "evidence for the human's decision"
+
+# time & delegation
+python3 cockpit.py stale [days]              # todos untouched for N+ days (default 7)
+python3 cockpit.py seed "an idea" [source]   # 1-click idea capture -> seedbed project
+python3 cockpit.py assign proj-1 "work"      # put a task straight in the agent's inbox
+python3 cockpit.py request-detail t8         # ask the agent to write the how-to for a task
 
 # housekeeping
 python3 cockpit.py validate                  # check the ledger for errors
 ```
+
+Every mutation stamps `created` / `status_changed` and appends one line to `events.jsonl`
+(an append-only journal), so the dashboard can show a timeline and flag silently-stalled tasks.
+Old tasks without timestamps are treated as "unknown" — never false-flagged.
 
 ## Optional: 1-click approval in the browser
 
@@ -151,6 +165,19 @@ Open `http://127.0.0.1:8765` and the cards get **[✅ Approve] [🗑 Reject] [Do
 buttons. Clicking updates `state.json` and regenerates the page — so approval reaches the agent's
 inbox immediately. Standard library only; binds `127.0.0.1` (local only). Without the server, just
 open `dashboard.html` (the buttons become copy-paste commands — nothing breaks).
+
+## Themes
+
+The dashboard ships with four skins — cycle them with the **👕 テーマ** button in the sidebar
+(the choice is saved in `localStorage`; it never touches `state.json`, because a UI preference
+is not project state):
+
+| Theme | Mood | Particles |
+| --- | --- | --- |
+| 🔥 Phoenix (default) | dark, flame-gold | rising embers |
+| 🛰 Satellite | deep-space navy × cyan | drifting stars |
+| 🐋 Orca | black & white × ice blue | rising bubbles |
+| 🏔 Wind (mountain) | light, mist & fresh green | floating leaves |
 
 ## Wiring your agent
 
@@ -187,6 +214,8 @@ Tell your agent (in its instructions/system file):
 ```bash
 python3 eval.py             # drift=0 round-trip, HITL gate, token reduction
 python3 eval_dashboard.py   # invariants on the rendered HTML
+python3 eval_h1.py          # time metadata, journal, stale detection, backward compat
+python3 eval_theme.py       # the 4 themes: default, determinism, switcher, palettes
 ```
 
 Both run in CI on every push (`.github/workflows/ci.yml`). See [DESIGN.md](DESIGN.md) for what

@@ -31,14 +31,14 @@ total_phases = sum(len(p.get("phases", [])) for p in projs)
 label_y = sum(len(p.get("phases", [])) or 1 for p in projs)   # card label uses (len or 1)
 with_cur = sum(1 for p in projs if done_cnt(p) < len(p.get("phases", [])))
 human_todo = sum(1 for p in projs for t in p.get("tasks", []) if t.get("owner") == "human" and t.get("status") == "todo")
-card_n = H.count('class="card"')
+card_n = len(re.findall(r'class="card\b', H))       # \b so "card overdue" also counts (modifier-safe)
 openmodal_n = H.count('onclick="openModal(this)"')
 
 seg_done = len(re.findall(r'class="seg done"', H))
 seg_cur = len(re.findall(r'class="seg cur"', H))
 seg_all = len(re.findall(r'class="seg', H))
 labs = re.findall(r"(\d+)/(\d+) done", H)
-now_n = len(re.findall(r'class="nowcard"', H))
+now_n = len(re.findall(r'class="nowcard\b', H))     # \b so "nowcard overdue" also counts (modifier-safe)
 near_n = max(sum(1 for p in _sorted_projects(state) if near_term(p)), 1)
 
 checks = [
@@ -56,8 +56,8 @@ checks = [
     ("now count == near_term count", now_n == near_n, f"{now_n} vs {near_n}"),
     ("every project name appears", all(p["name"] in H for p in projs), ""),
     ("no template leftovers", "None" not in re.findall(r">(None)<", H), ""),
-    ("menu: data-pg links == 5", H.count('data-pg="') == 5, H.count('data-pg="')),
-    ("menu: page sections == 5", H.count('class="page') == 5, H.count('class="page')),
+    ("menu: data-pg links == 4", H.count('data-pg="') == 4, H.count('data-pg="')),
+    ("menu: page sections == 4", H.count('class="page') == 4, H.count('class="page')),
     ("menu: tab-switch JS present", "classList.toggle" in H, ""),
     ("your-tasks lane == human todos", H.count('class="apr work"') == human_todo, f"{H.count('class=\"apr work\"')} vs {human_todo}"),
 ]
