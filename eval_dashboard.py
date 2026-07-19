@@ -25,21 +25,28 @@ def done_cnt(p):
 
 
 projs = state["projects"]
-n = len(projs)
-total_done = sum(done_cnt(p) for p in projs)
-total_phases = sum(len(p.get("phases", [])) for p in projs)
-label_y = sum(len(p.get("phases", [])) or 1 for p in projs)   # card label uses (len or 1)
-with_cur = sum(1 for p in projs if done_cnt(p) < len(p.get("phases", [])))
+# P2以降、フルカード描画は active のみ（parked は1行に畳む）。カード系の不変条件は active を母数にする。
+act = [p for p in projs if p.get("mode") != "parked"]
+parked_n_state = len(projs) - len(act)
+n = len(act)
+total_done = sum(done_cnt(p) for p in act)
+total_phases = sum(len(p.get("phases", [])) for p in act)
+label_y = sum(len(p.get("phases", [])) or 1 for p in act)   # card label uses (len or 1)
+with_cur = sum(1 for p in act if done_cnt(p) < len(p.get("phases", [])))
 human_todo = sum(1 for p in projs for t in p.get("tasks", []) if t.get("owner") == "human" and t.get("status") == "todo")
 card_n = len(re.findall(r'class="card\b', H))       # \b so "card overdue" also counts (modifier-safe)
 openmodal_n = H.count('onclick="openModal(this)"')
+
+nav_pgs = re.findall(r'data-pg="([\w-]+)"', H)       # 左メニューのリンク
+sec_pgs = re.findall(r'id="pg-([\w-]+)"', H)         # 対応するページ節
 
 seg_done = len(re.findall(r'class="seg done"', H))
 seg_cur = len(re.findall(r'class="seg cur"', H))
 seg_all = len(re.findall(r'class="seg', H))
 labs = re.findall(r"(\d+)/(\d+) done", H)
 now_n = len(re.findall(r'class="nowcard\b', H))     # \b so "nowcard overdue" also counts (modifier-safe)
-near_n = max(sum(1 for p in _sorted_projects(state) if near_term(p)), 1)
+near_n = max(sum(1 for p in _sorted_projects(state) if near_term(p) and p.get("mode") != "parked"), 1)
+parked_rows = len(re.findall(r'class="parkedrow"', H))
 
 checks = [
     ("project cards == projects", card_n == n, f"{card_n} vs {n}"),
@@ -55,9 +62,12 @@ checks = [
     ("label count == projects", len(labs) == n, f"{len(labs)} vs {n}"),
     ("now count == near_term count", now_n == near_n, f"{now_n} vs {near_n}"),
     ("every project name appears", all(p["name"] in H for p in projs), ""),
+    ("parked rows == parked projects", parked_rows == parked_n_state, f"{parked_rows} vs {parked_n_state}"),
     ("no template leftovers", "None" not in re.findall(r">(None)<", H), ""),
-    ("menu: data-pg links == 4", H.count('data-pg="') == 4, H.count('data-pg="')),
-    ("menu: page sections == 4", H.count('class="page') == 4, H.count('class="page')),
+    # ページ数を固定値で縛らない（増やす度に赤くなるだけ）。本来の不変条件は
+    # 「ナビのリンク ⇄ ページ節 が 1対1」＝ 押しても何も出ないタブ／到達不能なページが無いこと。
+    ("menu: nav links == page sections (1:1)", sorted(nav_pgs) == sorted(sec_pgs), f"{sorted(nav_pgs)} vs {sorted(sec_pgs)}"),
+    ("menu: >=4 pages", len(nav_pgs) >= 4, len(nav_pgs)),
     ("menu: tab-switch JS present", "classList.toggle" in H, ""),
     ("your-tasks lane == human todos", H.count('class="apr work"') == human_todo, f"{H.count('class=\"apr work\"')} vs {human_todo}"),
 ]

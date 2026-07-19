@@ -48,6 +48,14 @@ eval.py             # self-test: drift=0, HITL gate, token reduction
 eval_dashboard.py   # self-test: invariants on the generated HTML
 eval_h1.py          # self-test: time metadata, journal, stale detection, backward compat
 eval_theme.py       # self-test: the 4 dashboard themes (verification-first)
+eval_donepropose.py     # self-test: the "done" HITL gate (propose/confirm/reject)
+eval_aicursor.py        # self-test: the agent journal cursor (diff / --advance)
+eval_intent.py          # self-test: readback (intent capture before starting a task)
+eval_mode.py            # self-test: set-mode (focus / parked / normal)
+eval_grouping.py        # self-test: groups, ownership, cross-project find
+eval_phasegroup.py      # self-test: phase progress derived from task groups
+eval_deviations.py      # self-test: stale milestones / expired focus get surfaced
+eval_phase_feedback.py  # self-test: phase-advance guardrails
 state.example.json  # sample data (copied to state.json on first run)
 DESIGN.md           # why it works this way
 
@@ -146,8 +154,27 @@ python3 cockpit.py stale [days]              # todos untouched for N+ days (defa
 python3 cockpit.py seed "an idea" [source]   # 1-click idea capture -> seedbed project
 python3 cockpit.py assign proj-1 "work"      # put a task straight in the agent's inbox
 python3 cockpit.py request-detail t8         # ask the agent to write the how-to for a task
+python3 cockpit.py readback t8 "how I'm reading this / my first move"  # agent: read-back before starting
+
+# completion (its own HITL gate — an agent's "done" is a claim, not a fact)
+python3 cockpit.py propose-done t8 "evidence"  # agent: mark verified-and-ready-to-confirm (status unchanged)
+python3 cockpit.py confirm-done t8             # human: confirm -> status=done
+python3 cockpit.py reject-done  t8             # human: send back (task stays, marker cleared)
+
+# grouping & ownership (cross-project slices)
+python3 cockpit.py add-group proj-1 g1 "Group name" [order]
+python3 cockpit.py set-group  t8 g1          # set-group t8 --clear to unset
+python3 cockpit.py set-owner  t8 ai          # ai | human
+python3 cockpit.py group g1                  # list every task in a group (any project)
+python3 cockpit.py find "keyword" [--group g1]   # search all tasks, including done (dedup check)
+python3 cockpit.py set-phase-groups proj-1 1 g1,g2   # link a phase to groups: progress derives from their tasks
+
+# agent journal
+python3 cockpit.py diff              # what happened since the agent last looked (cursor untouched)
+python3 cockpit.py diff --advance    # same, then mark it read
 
 # housekeeping
+python3 cockpit.py set-mode proj-1 focus     # focus | parked | normal
 python3 cockpit.py validate                  # check the ledger for errors
 ```
 
@@ -212,10 +239,18 @@ Tell your agent (in its instructions/system file):
 ## Tests
 
 ```bash
-python3 eval.py             # drift=0 round-trip, HITL gate, token reduction
-python3 eval_dashboard.py   # invariants on the rendered HTML
-python3 eval_h1.py          # time metadata, journal, stale detection, backward compat
-python3 eval_theme.py       # the 4 themes: default, determinism, switcher, palettes
+python3 eval.py                 # drift=0 round-trip, HITL gate, token reduction
+python3 eval_dashboard.py       # invariants on the rendered HTML
+python3 eval_h1.py              # time metadata, journal, stale detection, backward compat
+python3 eval_theme.py           # the 4 themes: default, determinism, switcher, palettes
+python3 eval_donepropose.py     # propose-done / confirm-done / reject-done HITL gate
+python3 eval_aicursor.py        # diff / --advance: the agent-facing journal cursor
+python3 eval_intent.py          # readback: intent capture before an agent starts a task
+python3 eval_mode.py            # set-mode: focus / parked / normal
+python3 eval_grouping.py        # groups, ownership (ai|human), cross-project find
+python3 eval_phasegroup.py      # set-phase-groups: phase progress derived from task groups
+python3 eval_deviations.py      # stale milestones / expired focus surfaced, not silently dropped
+python3 eval_phase_feedback.py  # phase-advance guardrails
 ```
 
 Both run in CI on every push (`.github/workflows/ci.yml`). See [DESIGN.md](DESIGN.md) for what

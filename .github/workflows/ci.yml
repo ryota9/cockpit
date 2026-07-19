@@ -22,3 +22,19 @@ jobs:
         run: python eval_h1.py
       - name: themes (verification-first)
         run: python eval_theme.py
+      - name: done HITL gate (propose/confirm/reject)
+        run: python eval_donepropose.py
+      - name: agent journal cursor (diff / --advance)
+        run: python eval_aicursor.py
+      - name: readback (intent capture)
+        run: python eval_intent.py
+      - name: set-mode (focus / parked / normal)
+        run: python eval_mode.py
+      - name: groups, ownership, cross-project find
+        run: python eval_grouping.py
+      - name: phase progress derived from task groups
+        run: python eval_phasegroup.py
+      - name: stale milestones / expired focus surfaced
+        run: python eval_deviations.py
+      - name: phase-advance guardrails
+        run: python eval_phase_feedback.py

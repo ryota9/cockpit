@@ -97,3 +97,27 @@ Tell your agent (e.g. in its system/instructions file):
 
 That is the entire contract: the agent reads a thin file and proposes; the human approves;
 deterministic code keeps the books.
+
+---
+
+## 教育係（edu/）— コーディング学習ゲートのCockpit常設化（2026-07-12・設計）
+
+**発案**: 王。RRFの穴埋め→説明ゲート→Phoenix記録、という今日の学習の流れを常設の仕組みに。会社の学習ゲート哲学(feedback_knowledge_hollowing)の実装。
+
+**教育係 ≠ Phoenix（兄弟・配線でつながる）**:
+- 教育係🐣 = 前向き。問題を出す/採点/解説（パーソナルトレーナー）。1問ごと・Cockpit UI・速い。
+- Phoenix🐥🔥 = 後ろ向き。記録/スキルマップ/分析（カルテ・成績表）。1日ごと・Notion・重い。
+- 連携: 教育係はPhoenixのstrategy.md(スキルマップ)を読んで何を出すか決め、正解→Phoenixの学習ログへ手渡す。＝王の原則「実行と判定の分離」。
+
+**ADR-0006を守る置き場所**（Cockpitはブローカー、eduが所有＝pr_feed方式）:
+```
+cockpit/edu/  tutor.md（教育係の人格・基準）/ syllabus.json（項目＋学習済みフラグ・王承認制）
+              problems/（生成問題・提出・解説 1問1ファイル）/ edu.py（決定論ブローカー→claude -p）
+```
+正本 state.json にLLMは触れない。edu.py が edu 内の状態を所有し、結果（習得フラグ）だけを扱う。
+
+**フロー**: Nowに今日の問題 → 提出ボタン `/edu-submit`（serve.py・即時 claude -p 採点）→ 解説ページ（pr-preview方式）→ 正解=Phoenix記録＋syllabus学習済み／不正解=同type別問題＋どこが違うか解説。
+
+**4決定（王・2026-07-12）**: ①採点=即時 ②シラバス=教育係草案→王承認 ③採点=LLM＋解説 ④Phoenix=正解時に学習ログ1行自動追記。
+
+**Phase**: 1=MVP(tutor/edu.py/シラバスタブ/Now今日の問題/提出→採点→解説/学習済みフラグ)。2=不正解の自動差し替え・問題集タブ・Phoenix本連携。

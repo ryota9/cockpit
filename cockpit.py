@@ -22,6 +22,7 @@ CLI:
   set-phase <pid> <phase# from 0> <done|todo>           # human: advance the Journey
   focus <pid> [days] / unfocus <pid>                    # human: mark hot for a few days
   now [days]                        # what's hot in the next N days (default 3)
+  diff [--advance]                  # agent: journal changes since the AI cursor (--advance = mark read)
   validate                          # check the canonical state for errors
 """
 from __future__ import annotations
@@ -33,6 +34,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "edu"))
+try:
+    import raven as _raven   # 教育係（edu/raven.py）。無くてもCockpit本体は動く
+except Exception as _e:      # noqa: BLE001
+    _raven = None
 STATE = HERE / "state.json"
 EXAMPLE = HERE / "state.example.json"
 BAK = HERE / "state.json.bak"
@@ -42,15 +48,59 @@ LOGO = HERE / "cockpit-logo-sidebar.png"   # phoenix golden-bird brand mark (opt
 BG_D = HERE / "bg-phoenix-d.jpg"           # backdrop "D" (gold/ember) — default
 BG_B = HERE / "bg-phoenix-b.jpg"           # backdrop "B" (magenta/violet embers)
 
+# Canva製のテーマ別ブランドタイル（黒フェニックス以外の7テーマ）。中央にモチーフ＋"Cockpit"文字。
+# 黒フェニックス(th-phoenix)は既存の cockpit-logo-sidebar.png のまま（不変）。CSP自己完結=base64埋込。
+THEME_TILE_IMG = {
+    "th-phoenix-l":   HERE / "tile-phoenix-l.jpg",    # 白地に金の不死鳥
+    "th-satellite":   HERE / "tile-satellite.jpg",    # 軌道・惑星（宇宙）
+    "th-satellite-l": HERE / "tile-satellite-l.jpg",  # 暁の惑星
+    "th-orca":        HERE / "tile-orca.jpg",         # シャチ・波（深海）
+    "th-orca-l":      HERE / "tile-orca-l.jpg",        # シャチ・波（浅瀬）
+    "th-wind":        HERE / "tile-wind.jpg",          # 朝の山
+    "th-wind-d":      HERE / "tile-wind-d.jpg",        # 夜の山
+}
+# Canva製のテーマ別背景（class -> (画像, ::before の不透明度)）。黒フェニックスの炎金写真は別管理で不変。
+THEME_BG_IMG = {
+    "th-phoenix-l":   (HERE / "bg-phoenix-l.jpg",   0.70),  # 白地に金の羽根
+    "th-satellite":   (HERE / "bg-satellite.jpg",   0.90),  # 星空
+    "th-satellite-l": (HERE / "bg-satellite-l.jpg", 0.72),  # 夜明けの成層圏
+    "th-orca":        (HERE / "bg-orca.jpg",        0.90),  # 濃紺の深海
+    "th-orca-l":      (HERE / "bg-orca-l.jpg",      0.60),  # 明るいターコイズの浅瀬
+    "th-wind":        (HERE / "bg-wind.jpg",        0.68),  # 朝もやの山
+    "th-wind-d":      (HERE / "bg-wind-d.jpg",      0.90),  # 藍の夜山
+}
+
 # 着せ替えテーマ（クライアント側切替・localStorage。正本 state.json には書かない）
 # phoenix が先頭＝デフォルト（王のお気に入り: 炎金背景）。CSSは DASH_CSS 末尾の上書きブロック。
-THEMES = (("th-phoenix", "フェニックス"), ("th-satellite", "衛星"),
-          ("th-orca", "オルカ"), ("th-wind", "風（山）"))
+# 8テーマ = 基準4 + 反対カラー4（-l=明反転 / -d=暗反転）。ペアで明↔暗が反転する。
+THEMES = (("th-phoenix", "フェニックス"), ("th-phoenix-l", "白フェニックス"),
+          ("th-satellite", "衛星"), ("th-satellite-l", "衛星（暁）"),
+          ("th-orca", "オルカ"), ("th-orca-l", "オルカ（浅瀬）"),
+          ("th-wind", "風（山）"), ("th-wind-d", "風（夜）"))
+
+# テーマタイル（選択UI）のミニプレビュー: class -> (タイル背景, 3スウォッチ, エフェクト絵文字)
+THEME_TILES = {
+    "th-phoenix":     ("linear-gradient(160deg,#1a1024,#120c1d)", ("#ffc629", "#ff6a13", "#ff3d2e"), "🔥"),
+    "th-phoenix-l":   ("linear-gradient(160deg,#fffaf0,#ffe9c7)", ("#e8920f", "#ff6a13", "#c0392b"), "🔥"),
+    "th-satellite":   ("linear-gradient(160deg,#0d2a52,#050a16)", ("#5ec8ff", "#8f7bff", "#bfe6ff"), "🪨"),
+    "th-satellite-l": ("linear-gradient(160deg,#eaf4ff,#cfe6ff)", ("#3d8fe0", "#7b8fff", "#ffd59e"), "🪨"),
+    "th-orca":        ("linear-gradient(160deg,#0c3146,#04090e)", ("#6fd8ff", "#bfeafc", "#ffffff"), "🫧"),
+    "th-orca-l":      ("linear-gradient(160deg,#e6f7f6,#c7ecef)", ("#0f9bb3", "#2fc6c0", "#ffca7a"), "🫧"),
+    "th-wind":        ("linear-gradient(160deg,#d8e9f4,#e4efe8)", ("#2f8f76", "#5aa9d6", "#a9d8b8"), "🍃"),
+    "th-wind-d":      ("linear-gradient(160deg,#131b3c,#0b1024)", ("#6f8fe0", "#3b4a86", "#8fa6d6"), "🍃"),
+}
 
 HUMAN_STATUS = {"todo", "done", "skip", "dropped"}
 ALL_STATUS = HUMAN_STATUS | {"proposed"}
 PRIO_ORDER = {"high": 0, "mid": 1, "low": 2}
 PRIO_MARK = {"high": "🔴 High", "mid": "🟡 Mid", "low": "⚪ Low"}
+
+# 押下→即「受け取った」を見せる受領文言（軸1: 非同期の断絶を即時フィードバックで埋める・
+# docs/drift-phase-and-feedback.md §4.2）。serve が redirect の ?msg=<key> でこのキーを指し、
+# dashboard の momentum(.msg)帯に出す。i18n をここ1箇所に集約＝OSS 汎用（未知キーは no-op）。
+FLASH = {
+    "received": "🕓 秘書の受信箱に届きました（次の点検で処理します）",
+}
 
 # ===== H1: time metadata / journal / stale (design-hub-v2 §1.2 C1-C3) =====
 JOURNAL = HERE / "events.jsonl"          # append-only audit log (gitignored: private data)
@@ -132,7 +182,8 @@ def journal_append(path, entry: dict, now: str | None = None) -> None:
 
 
 # --- state を直接受け取る純粋なミューテータ（I/Oなし・テストから直接呼べる） ---
-def mutate_propose(state: dict, pid: str, desc: str, why: str = "", now: str | None = None) -> dict:
+def mutate_propose(state: dict, pid: str, desc: str, why: str = "", now: str | None = None,
+                   group: str | None = None) -> dict:
     proj = _find_project(state, pid)
     if not proj:
         raise KeyError(f"project {pid} not found")
@@ -142,8 +193,32 @@ def mutate_propose(state: dict, pid: str, desc: str, why: str = "", now: str | N
             "created": ts, "status_changed": ts}
     if why:
         task["why"] = why
+    g = (group or "").strip()
+    if g:
+        task["group"] = g
     proj.setdefault("tasks", []).append(task)
     return task
+
+
+def is_parked(p: dict) -> bool:
+    """駐機中か。mode無し＝active（後方互換: 既存stateは挙動不変）。"""
+    return p.get("mode") == "parked"
+
+
+def mutate_set_mode(state: dict, pid: str, mode: str) -> dict:
+    """プロジェクトの mode（active/parked）を振る。人間だけが呼ぶ（HITL）。
+    WIPの明示（consult v3 P2）: 14枚の壁を「いま動かしている数枚」に畳むための正本フィールド。
+    active は正規形としてキーを消す（無印=active）＝古いstateとdiffが揺れない。"""
+    if mode not in ("active", "parked"):
+        raise ValueError(f"mode must be active|parked; got: {mode}")
+    p = _find_project(state, pid)
+    if not p:
+        raise KeyError(f"project {pid} not found")
+    if mode == "parked":
+        p["mode"] = "parked"
+    else:
+        p.pop("mode", None)
+    return p
 
 
 def mutate_set_status(state: dict, tid: str, status: str, now: str | None = None) -> dict:
@@ -153,6 +228,221 @@ def mutate_set_status(state: dict, tid: str, status: str, now: str | None = None
     t["status"] = status
     t["status_changed"] = now or _today()      # created は不変
     return t
+
+
+# ===== phase×group結合（P5・正直な物差し）: phaseの進捗をタスクから導出する ==========
+def mutate_set_phase_groups(state: dict, pid: str, idx: int, group_ids: list) -> dict:
+    """phase に group を紐づける（1対多）。以後そのphaseの進捗は紐づくgroupのタスクから導出。
+    記述メタデータ（set-detailと同格）。存在しないgroupは拒否＝ぶら下がり参照を作らない。"""
+    p = _find_project(state, pid)
+    if not p:
+        raise KeyError(f"project {pid} not found")
+    phases = p.get("phases", [])
+    idx = int(idx)
+    if not (0 <= idx < len(phases)):
+        raise KeyError(f"{pid} phase[{idx}] not found (phases: {len(phases)})")
+    known = {g["id"] for g in p.get("groups", [])}
+    bad = [g for g in group_ids if g not in known]
+    if bad:
+        raise ValueError(f"unknown group(s) {bad} — 先に add-group で定義（known: {sorted(known)}）")
+    if group_ids:
+        phases[idx]["groups"] = list(group_ids)
+    else:
+        phases[idx].pop("groups", None)   # 空＝解除（正規形はキー無し）
+    return phases[idx]
+
+
+def _phase_task_progress(p: dict, phase: dict):
+    """紐づくgroupのタスクで (done, total) を導出。未紐づけは None（0/0という嘘を出さない）。
+    total=承認済みスコープのみ: todo+done（proposedは未承認・dropped/不要/破棄/skipは捨てた約束）。"""
+    gids = phase.get("groups")
+    if not gids:
+        return None
+    ts = [t for t in p.get("tasks", []) if t.get("group") in gids
+          and t.get("status") in ("todo", "done")]
+    return (sum(t["status"] == "done" for t in ts), len(ts))
+
+
+# ===== read-back（P4・航空のICAO復唱）: approve→着手の引き渡しで解釈のズレを殺す ==========
+def mutate_readback(state: dict, tid: str, text: str, now: str | None = None) -> dict:
+    """AI: 着手時に「このタスクをこう解釈した／最初の一手はこれ」を1行で刻む。
+    statusは触らない（記述メタデータ）。王はカードの💬を一瞥し、違ったら止める＝hear-back。"""
+    _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("readback text is empty — 解釈か最初の一手を1行で")
+    t["readback"] = {"text": text[:200], "at": now or _today()}
+    return t
+
+
+def readback(tid, text):   # agent: CLI専用（着手の宣言・復唱）
+    state = load_state()
+    mutate_readback(state, tid, text)
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "readback", "tid": tid})
+    return f"💬 {tid} read-back 刻印（王が一瞥→違ったら止める）"
+
+
+# ===== 再交渉（P3 ダークコックピット）: 腐った約束を「直すか捨てるか」の2択へ ==========
+def _find_milestone(state: dict, pid: str, name: str) -> dict:
+    p = _find_project(state, pid)
+    if not p:
+        raise KeyError(f"project {pid} not found")
+    m = next((m for m in p.get("milestones", []) if m.get("name") == name), None)
+    if not m:
+        raise KeyError(f"milestone not found: {pid}/{name}")
+    return m
+
+
+def mutate_defer_milestone(state: dict, pid: str, name: str, expect_due: str, new_due: str) -> dict:
+    """⏰ 延期: due を new_due へ。expect_due は楽観ロック（ボタン描画時の due と一致しなければ
+    裏で変わっている＝拒否してリロードさせる）。done/dropped の再交渉は無意味なので拒否。"""
+    m = _find_milestone(state, pid, name)
+    if m.get("status") in ("done", "dropped"):
+        raise ValueError(f"milestone {name} is {m.get('status')} — 再交渉の対象外")
+    if m.get("due") != expect_due:
+        raise ValueError(f"milestone {name} due changed ({m.get('due')} != {expect_due}) — reload")
+    m["due"] = new_due
+    return m
+
+
+def mutate_drop_milestone(state: dict, pid: str, name: str, expect_due: str) -> dict:
+    """🗑 取り下げ: status=dropped。削除はしない（何を約束して何を捨てたかは履歴）。"""
+    m = _find_milestone(state, pid, name)
+    if m.get("status") in ("done", "dropped"):
+        raise ValueError(f"milestone {name} is already {m.get('status')}")
+    if m.get("due") != expect_due:
+        raise ValueError(f"milestone {name} due changed — reload")
+    m["status"] = "dropped"
+    return m
+
+
+def _deviations(state: dict, today: str) -> list:
+    """逸脱＝再交渉が必要な腐った約束の列挙（決定論・読取のみ）。
+    parked は対象外（意図した眠り）。返す形: {kind, pid, pname, name, due, days}。"""
+    out = []
+    for p in state.get("projects", []):
+        if is_parked(p):
+            continue
+        for m in p.get("milestones", []):
+            if m.get("status") in ("done", "dropped") or not m.get("due"):
+                continue
+            if m["due"] < today:
+                days = (date.fromisoformat(today) - date.fromisoformat(m["due"])).days
+                out.append({"kind": "milestone", "pid": p["id"], "pname": p.get("name", ""),
+                            "name": m.get("name", ""), "due": m["due"], "days": days})
+        fu = p.get("focus_until")
+        if fu and fu < today:
+            days = (date.fromisoformat(today) - date.fromisoformat(fu)).days
+            out.append({"kind": "focus", "pid": p["id"], "pname": p.get("name", ""),
+                        "name": "focus失効", "due": fu, "days": days})
+    out.sort(key=lambda d: -d["days"])   # 腐りが古い順＝一番放置された約束が先頭
+    return out
+
+
+# ===== 完了提案キュー（ADR-0006の"完了側"）: propose-done → 王が confirm-done ==========
+# 作成の propose→approve と対称。AIは done_proposed マーカーを付けるだけで status は動かせない
+# （＝完了も人間ゲート）。マーカー無し = 従来どおり（後方互換）。純粋ミューテータ（I/Oなし）。
+def mutate_propose_done(state: dict, tid: str, evidence: str = "", now: str | None = None) -> dict:
+    """AI: 検証済みタスクに done_proposed マーカー(evidence/at)を付ける。status は変えない
+    （人間の confirm-done を待つ＝HITLゲート）。対象1タスクのみ・他は不変。"""
+    _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    t["done_proposed"] = {"evidence": (evidence or "").strip(), "at": now or _today()}
+    return t
+
+
+def mutate_confirm_done(state: dict, tid: str, now: str | None = None) -> dict:
+    """王: 完了を確定。status=done を刻印し done_proposed マーカーを消す（承認＝状態遷移）。"""
+    _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    t["status"] = "done"
+    t["status_changed"] = now or _today()
+    t.pop("done_proposed", None)
+    return t
+
+
+def mutate_reject_done(state: dict, tid: str) -> dict:
+    """王: 差し戻し（実は未完だった）。マーカーだけ外し status は不変＝タスクは元のまま残る。"""
+    _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    t.pop("done_proposed", None)
+    return t
+
+
+# ===== Grouping: task.group（任意・後方互換）と表示メタ（design-grouping.md §1-2） =====
+UNGROUPED = "未分類"                             # group 無しタスクの仮想グループ（欠測に強い既定）
+
+
+def mutate_set_group(state: dict, tid: str, group: str | None, now: str | None = None) -> dict:
+    """タスクにグループを付与/除去する純粋ミューテータ（対象1件のみ・group は status と直交）。
+    group が空/None なら group キーを外して『未分類』へ。status_changed は刻印しない（規約踏襲）。"""
+    _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    g = (group or "").strip()
+    if g:
+        t["group"] = g
+    else:
+        t.pop("group", None)
+    return t
+
+
+def mutate_add_group(state: dict, pid: str, gid: str, name: str, order=None) -> dict:
+    """プロジェクトに group 表示メタ（id/name/order）を追加・更新（任意・欠測に強い）。"""
+    p = _find_project(state, pid)
+    if not p:
+        raise KeyError(f"project {pid} not found")
+    groups = p.setdefault("groups", [])
+    existing = next((g for g in groups if g.get("id") == gid), None)
+    if existing:
+        existing["name"] = name
+        if order is not None:
+            existing["order"] = int(order)
+    else:
+        groups.append({"id": gid, "name": name, "order": int(order) if order is not None else len(groups) + 1})
+    return p
+
+
+def group_tasks(project: dict):
+    """プロジェクトのタスクをグループ順に束ねる（決定論・data-agnostic）。
+    順序: groups[].order の定義済み → メタ無しスラグ(昇順) → 未分類(最後)。
+    戻り値: [{"id": slug|None, "name": 表示名, "tasks": [...]}]（各タスクはちょうど1グループに属す）。"""
+    meta = {g.get("id"): g for g in project.get("groups", []) if g.get("id")}
+    buckets: dict = {}
+    seen = []                                   # 出現順を保持（決定論）
+    for t in project.get("tasks", []):
+        gid = t.get("group") or None
+        if gid not in buckets:
+            buckets[gid] = []
+            seen.append(gid)
+        buckets[gid].append(t)
+    defined = sorted([g for g in seen if g is not None and g in meta],
+                     key=lambda g: (meta[g].get("order", 10 ** 9), g))
+    undefined = sorted([g for g in seen if g is not None and g not in meta])
+    ordered = defined + undefined + ([None] if None in buckets else [])
+    out = []
+    for gid in ordered:
+        name = UNGROUPED if gid is None else (meta[gid].get("name", gid) if gid in meta else gid)
+        out.append({"id": gid, "name": name, "tasks": buckets[gid]})
+    return out
+
+
+def _filter_state_by_group(state: dict, group: str) -> dict:
+    """group 縮約用: 指定グループのタスクだけを残した state のシャロー複製（他グループ行を落とす）。"""
+    out = {"projects": []}
+    for p in state.get("projects", []):
+        tasks = [t for t in p.get("tasks", []) if (t.get("group") or None) == (group or None)]
+        if tasks:
+            np = dict(p)
+            np["tasks"] = tasks
+            out["projects"].append(np)
+    return out
 
 
 def validate(state) -> list:
@@ -180,7 +470,8 @@ def _phase_progress(p):
 
 
 def _next_due(p):
-    dues = [m["due"] for m in p.get("milestones", []) if m.get("status") != "done" and m.get("due")]
+    # dropped（取り下げた約束）は期限計算から外す — 取り下げたのに🚨OVERDUEが残ると再交渉の意味がない
+    dues = [m["due"] for m in p.get("milestones", []) if m.get("status") not in ("done", "dropped") and m.get("due")]
     dues += [t["due"] for t in p.get("tasks", []) if t.get("status") == "todo" and t.get("due")]
     return min(dues) if dues else None
 
@@ -200,16 +491,20 @@ def _next_action(p):
 
 
 def _sorted_projects(state):
+    # parked は常に最後（受信箱・カード・snapshot節すべてで「いま動かすもの」が先に来る）
     return sorted(state["projects"],
-                  key=lambda p: (PRIO_ORDER.get(p.get("priority", "mid"), 1), _next_due(p) or "9999"))
+                  key=lambda p: (is_parked(p), PRIO_ORDER.get(p.get("priority", "mid"), 1), _next_due(p) or "9999"))
 
 
 # --- Snapshot (the thin layer the agent reads) ---
 def snapshot_project(p):
     phase, dn, tot = _phase_progress(p)
+    cur_ph = next((ph for ph in p.get("phases", []) if ph.get("status") != "done"), None)
+    ptp = _phase_task_progress(p, cur_ph) if cur_ph else None
     return {
         "id": p["id"], "name": p["name"], "goal": p.get("north_star", ""),
-        "priority": p.get("priority", "mid"),
+        "priority": p.get("priority", "mid"), "parked": is_parked(p),
+        "phase_tasks": f"{ptp[0]}/{ptp[1]}" if ptp else None,
         "phase": phase, "phase_progress": f"{dn}/{tot}" if tot else "—",
         "next_due": _next_due(p), "next_action": _next_action(p),
         "open_tasks": [f'{t["id"]}: {t["desc"]}' for t in _todos(p)],
@@ -217,27 +512,59 @@ def snapshot_project(p):
     }
 
 
-def make_snapshot(state):
-    return {"generated": str(date.today()), "projects": [snapshot_project(p) for p in _sorted_projects(state)]}
+def make_snapshot(state, group=None):
+    """全体スナップショット。group 指定時はそのグループのタスクだけに縮約（AIのトークン節約・§3.2）。"""
+    src = _filter_state_by_group(state, group) if group else state
+    snap = {"generated": str(date.today()), "projects": [snapshot_project(p) for p in _sorted_projects(src)]}
+    if group:
+        snap["group"] = group
+    return snap
 
 
-def render_snapshot_md(snap, state=None) -> str:
-    out = [f"# Cockpit Snapshot ({snap['generated']} · read-only · by priority)",
-           "> The agent reads this. Deep info: `detail <pid>`. Changes: agent proposes -> human approves.", ""]
-    ai_todos = [(p["id"], t) for p in (state or {}).get("projects", [])
-                for t in p.get("tasks", []) if t.get("owner") == "ai" and t.get("status") == "todo"]
-    if ai_todos:
+def render_snapshot_md(snap, state=None, group=None) -> str:
+    title = f"# Cockpit Snapshot ({snap['generated']} · read-only · by priority"
+    title += f" · group={group})" if group else ")"
+    out = [title,
+           "> The agent reads this. Deep info: `detail <pid>`. Changes: agent proposes -> human approves.",
+           "> 着手時の作法: `readback <tid> \"解釈 or 最初の一手を1行\"` を刻んでから始める（王が💬を一瞥＝復唱確認）。", ""]
+    # 受信箱: プロジェクト見出し＋意図1行（P4 commander's intent — 何のためのタスクかを添えて自走の質を上げる）。
+    # active優先・parked後置🅿（P2）。見出しに ## は使わない（セクション構造を壊さない）。
+    by_proj = []
+    for p in _sorted_projects(state or {"projects": []}):
+        ts = [t for t in p.get("tasks", []) if t.get("owner") == "ai" and t.get("status") == "todo"
+              and (group is None or (t.get("group") or None) == group)]
+        if ts:
+            by_proj.append((p, ts))
+    if by_proj:
         out.append("## 🤖 Ready for the agent (approved, owner=ai todos = my inbox)")
-        # detail未記載マーカー: 実行前に手順を書く運用（王FB: 手順はAIの仕事）を毎セッション想起させる
-        out += [f"- [{pid}] {t['id']}: {t['desc']}"
-                + ("" if t.get("detail") else "  ※detail未記載→着手前に set-detail で手順を書く")
-                for pid, t in ai_todos]
+        for p, ts in by_proj:
+            pk = "🅿 " if is_parked(p) else ""
+            intent = " → ".join(x for x in (p.get("north_star") and f"🎯 {p['north_star']}",
+                                            p.get("done_def") and f"🏁 {p['done_def']}") if x)
+            out.append(f"**{pk}[{p['id']}] {p['name']}** {intent}".rstrip())
+            # detail未記載マーカー: 実行前に手順を書く運用（王FB: 手順はAIの仕事）を毎セッション想起させる
+            out += [f"- {pk}{t['id']}: {t['desc']}"
+                    + (f"  ｜💬 {t['readback']['text']}" if t.get("readback") else "")
+                    + ("" if t.get("detail") else "  ※detail未記載→着手前に set-detail で手順を書く")
+                    for t in ts]
+        out.append("")
+    # ✅🕓 完了確認待ち（done-proposed）: AIが検証済みで王の confirm-done 待ち。王/エージェント双方に可視化。
+    done_prop = [(p["id"], t) for p in (state or {}).get("projects", [])
+                 for t in p.get("tasks", []) if t.get("done_proposed")
+                 and (group is None or (t.get("group") or None) == group)]
+    if done_prop:
+        out.append("## ✅🕓 Done-proposed (awaiting the king's confirm-done)")
+        for pid, t in done_prop:
+            ev = (t["done_proposed"] or {}).get("evidence", "")
+            out.append(f"- [{pid}] {t['id']}: {t['desc']}" + (f"  — 証跡: {ev}" if ev else ""))
         out.append("")
     for p in snap["projects"]:
         due = f" | due {p['next_due']}" if p["next_due"] else ""
-        out.append(f"## {PRIO_MARK.get(p['priority'],'')} {p['name']} ({p['id']}){due}")
+        pk = "🅿 " if p.get("parked") else ""
+        out.append(f"## {PRIO_MARK.get(p['priority'],'')} {pk}{p['name']} ({p['id']}){due}")
         out.append(f"- Goal: {p['goal']}")
-        out.append(f"- phase({p['phase_progress']}): {p['phase']}")
+        out.append(f"- phase({p['phase_progress']}): {p['phase']}"
+                   + (f"  [{p['phase_tasks']} tasks]" if p.get("phase_tasks") else ""))
         if p["next_action"]:
             out.append(f"- 👉 next: {p['next_action']}")
         out.append("- open (todo): " + (", ".join(p["open_tasks"]) if p["open_tasks"] else "none"))
@@ -311,6 +638,41 @@ def set_status(tid, status):
     return f"✅ {tid} → {status}"
 
 
+def defer_milestone(pid, name, expect_due, days=14):   # human: renegotiate a rotten promise (⏰)
+    state = load_state()
+    new_due = (date.today() + timedelta(days=int(days))).isoformat()
+    mutate_defer_milestone(state, pid, name, expect_due, new_due)
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "ms-defer", "pid": pid, "to": new_due})
+    return f"⏰ {pid}「{name}」→ {new_due} に延期"
+
+
+def drop_milestone(pid, name, expect_due):   # human: withdraw a promise (🗑, keeps history)
+    state = load_state()
+    mutate_drop_milestone(state, pid, name, expect_due)
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "ms-drop", "pid": pid})
+    return f"🗑 {pid}「{name}」を取り下げ（履歴は残る）"
+
+
+def set_phase_groups(pid, idx, groups_csv=""):   # link a phase to groups → progress derived from tasks (P5)
+    state = load_state()
+    gids = [g.strip() for g in groups_csv.split(",") if g.strip()]
+    ph = mutate_set_phase_groups(state, pid, idx, gids)
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "set-phase-groups", "pid": pid})
+    return (f"🔗 {pid} phase[{idx}]「{ph.get('name','')}」 ← groups {gids}" if gids
+            else f"🔗 {pid} phase[{idx}] の紐づけを解除")
+
+
+def set_mode(pid, mode):   # human: park / reactivate a project (WIP management)
+    state = load_state()
+    mutate_set_mode(state, pid, mode)
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "set-mode", "pid": pid, "to": mode})
+    return f"{'🅿' if mode == 'parked' else '▶'} {pid} → {mode}"
+
+
 def set_detail(tid, text):   # author a task's concrete next-steps (descriptive metadata, not a status gate)
     state = load_state(); _, t = _find_task(state, tid)
     if not t:
@@ -335,15 +697,16 @@ def add_doc(pid, label, path):   # attach a doc link (label + path) shown in the
     return f"✅ {pid} doc added: {label} → {path}"
 
 
-def propose(pid, desc, why=""):
+def propose(pid, desc, why="", group=None):
     state = load_state()
-    t = mutate_propose(state, pid, desc, why=why)   # created/status_changed/why を刻印・HITLゲート不変
+    t = mutate_propose(state, pid, desc, why=why, group=group)   # created/status_changed/why を刻印・HITLゲート不変
     save_state(state); emit_snapshot(state)
     journal_append(JOURNAL, {"op": "propose", "tid": t["id"], "pid": pid, "why": why})
-    return f"🟡 proposed {t['id']} (awaiting approval): {desc}" + (f"  [why: {why}]" if why else "")
+    tail = (f"  [why: {why}]" if why else "") + (f"  [group: {t['group']}]" if t.get("group") else "")
+    return f"🟡 proposed {t['id']} (awaiting approval): {desc}" + tail
 
 
-def add_task(pid, desc, prio=None):   # human: add your own task (agent-uninvolved = owner human todo)
+def add_task(pid, desc, prio=None, group=None):   # human: add your own task (agent-uninvolved = owner human todo)
     state = load_state()
     proj = _find_project(state, pid)
     if not proj:
@@ -354,10 +717,48 @@ def add_task(pid, desc, prio=None):   # human: add your own task (agent-uninvolv
          "created": ts, "status_changed": ts}
     if prio in PRIO_ORDER:
         t["priority"] = prio
+    g = (group or "").strip()
+    if g:
+        t["group"] = g
     proj.setdefault("tasks", []).append(t)
     save_state(state); emit_snapshot(state)
     journal_append(JOURNAL, {"op": "add", "tid": tid, "pid": pid})
-    return f"✅ added {tid} (your task · todo): {desc}"
+    return f"✅ added {tid} (your task · todo): {desc}" + (f"  [group: {g}]" if g else "")
+
+
+def set_group(tid, group):   # human/agent: attach or clear a task's group (I/O wrapper · ADR-0006)
+    state = load_state()
+    mutate_set_group(state, tid, group)
+    save_state(state); emit_snapshot(state)
+    g = (group or "").strip()
+    journal_append(JOURNAL, {"op": "set-group", "tid": tid, "group": g or None})
+    return f"✅ {tid} group → {g}" if g else f"✅ {tid} group cleared (未分類)"
+
+
+def mutate_set_owner(state: dict, tid: str, owner: str) -> dict:
+    if owner not in ("ai", "human"):
+        raise ValueError(f"owner must be ai|human, got {owner!r}")
+    _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    t["owner"] = owner
+    return t
+
+
+def set_owner(tid, owner):   # human: reassign who owns a task (🤖 ai ⇄ 👤 human) · ADR-0006
+    state = load_state()
+    mutate_set_owner(state, tid, owner)
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "set-owner", "tid": tid, "owner": owner})
+    return f"✅ {tid} owner → {owner}"
+
+
+def add_group(pid, gid, name, order=None):   # define a group's display meta (name/order) on a project
+    state = load_state()
+    mutate_add_group(state, pid, gid, name, order)
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "add-group", "pid": pid, "gid": gid})
+    return f"✅ {pid} group '{gid}' → {name}"
 
 
 def approve(tid):
@@ -376,6 +777,34 @@ def reject(tid):
     mutate_set_status(state, tid, "dropped"); save_state(state); emit_snapshot(state)
     journal_append(JOURNAL, {"op": "reject", "tid": tid})
     return f"🗑 rejected {tid} → dropped"
+
+
+# --- 完了提案の I/O ラッパ（ADR-0006: LLMは正本を直接書かず決定論アダプタ経由のみ） ---
+def propose_done(tid, evidence=""):   # agent: 検証済みタスクを「完了確認待ち」にする（status不変・CLI専用）
+    state = load_state()
+    t = mutate_propose_done(state, tid, evidence)   # done_proposed マーカーのみ・人間ゲート維持
+    save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "propose-done", "tid": tid, "why": evidence})
+    tail = f"  [evidence: {t['done_proposed']['evidence']}]" if t["done_proposed"]["evidence"] else ""
+    return f"✅🕓 done-proposed {tid} (awaiting the king's confirm): {t['desc']}" + tail
+
+
+def confirm_done(tid):   # human: 完了を確定（HITLゲート＝ここだけが done への遷移を許す）
+    state = load_state(); _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    mutate_confirm_done(state, tid); save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "confirm-done", "tid": tid})
+    return f"✅ confirmed {tid} → done"
+
+
+def reject_done(tid):   # human: 差し戻し（実は未完だった）。マーカーだけ外す＝タスクは残る
+    state = load_state(); _, t = _find_task(state, tid)
+    if not t:
+        raise KeyError(f"task {tid} not found")
+    mutate_reject_done(state, tid); save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "reject-done", "tid": tid})
+    return f"↩ done-proposal for {tid} sent back (still open)"
 
 
 def undo():   # human: revert the last state-changing action (one level, from the auto-backup)
@@ -423,6 +852,7 @@ def focus(pid, days=3):   # human: mark hot for a few days (urgency not captured
         raise KeyError(f"project {pid} not found")
     until = (date.today() + timedelta(days=int(days))).isoformat()
     p["focus_until"] = until; save_state(state); emit_snapshot(state)
+    journal_append(JOURNAL, {"op": "focus", "pid": pid, "to": until})   # 誰がいつ点けたか追える（2026-07-12の教訓）
     return f"🔥 {pid} focused (until {until})"
 
 
@@ -431,6 +861,7 @@ def unfocus(pid):
     p = _find_project(state, pid)
     if p and p.pop("focus_until", None) is not None:
         save_state(state); emit_snapshot(state)
+        journal_append(JOURNAL, {"op": "unfocus", "pid": pid})
     return f"focus cleared {pid}"
 
 
@@ -473,6 +904,18 @@ DASH_CSS = (
     ".main{padding:20px 26px}.head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px}.head h1{font-size:22px;margin:0}.date{color:var(--muted);font-size:13px}"
     ".momentum{display:flex;gap:18px;align-items:center;flex-wrap:wrap;background:linear-gradient(90deg,#eef4ff,#fff);border:1px solid var(--line);border-radius:14px;padding:12px 18px;margin-bottom:22px}"
     ".momentum .big{font-size:22px;font-weight:800;color:var(--accent)}.momentum .lbl{font-size:12px;color:var(--muted)}.momentum .sep{width:1px;height:30px;background:var(--line)}.momentum .msg{margin-left:auto;font-weight:700}"
+    ".momentum .msg.flash{color:var(--accent);font-weight:800;animation:flashin .32s ease-out}@keyframes flashin{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}"
+    ".pulsecard{background:var(--panel,#fff);border:1px solid var(--line);border-radius:14px;padding:12px 16px;margin-bottom:18px}"
+    ".pulserow{display:flex;gap:10px;align-items:center;padding:5px 0;border-bottom:1px dashed var(--line)}.pulserow:last-of-type{border-bottom:none}"
+    ".pulserow .pulsename{flex:1;font-size:13px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+    ".pulserow .pulsenum{font-size:12.5px;font-weight:700;white-space:nowrap}.pulserow svg{flex-shrink:0}"
+    ".parkedwrap{background:var(--panel,#fff);border:1px solid var(--line);border-radius:14px;padding:6px 16px;opacity:.75}"
+    ".parkedrow{display:flex;gap:10px;align-items:center;padding:7px 0;border-bottom:1px dashed var(--line)}.parkedrow:last-child{border-bottom:none}"
+    ".parkedrow .nm{flex:1;font-size:13px;font-weight:600}.parkedrow .id{font-size:11px;color:var(--muted)}"
+    ".devcard{background:linear-gradient(90deg,rgba(192,57,43,.07),transparent 60%);border:1px solid rgba(192,57,43,.35);border-left:4px solid #c0392b;border-radius:14px;padding:12px 16px;margin-bottom:18px}"
+    ".devtitle{font-size:13.5px;font-weight:800;color:#c0392b;margin-bottom:4px}"
+    ".devrow{display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line)}.devrow:last-child{border-bottom:none}"
+    ".devrow .devname{flex:1;font-size:13px;font-weight:600;min-width:0}.devrow .devdays{font-size:12px;font-weight:800;color:#c0392b;white-space:nowrap}"
     ".sectitle{font-size:14px;color:var(--muted);font-weight:700;margin:6px 2px 10px}"
     ".now{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:24px}.nowcard{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--hi);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow)}"
     ".nowcard .why{font-size:12px;color:var(--hi);font-weight:700;min-height:16px}.nowcard .nm{font-weight:800;margin:3px 0 8px}.nowcard .act{font-size:13px}.nowcard code{background:#2563eb12;color:var(--accent);padding:2px 6px;border-radius:5px;font-size:12px}"
@@ -484,21 +927,30 @@ DASH_CSS = (
     ".card{cursor:pointer;transition:box-shadow .12s,transform .12s}.card:hover{box-shadow:0 12px 30px rgba(31,45,61,.16);transform:translateY(-1px)}.cdetail{display:none}"
     ".jrow{display:flex;gap:3px;align-items:center;margin:8px 0 6px}.seg{height:7px;flex:1;border-radius:3px;background:var(--line)}.seg.done{background:var(--accent2)}.seg.cur{background:repeating-linear-gradient(45deg,var(--accent) 0 3px,transparent 3px 6px),var(--line)}.jlbl{font-size:11px;color:var(--muted);margin-left:6px;white-space:nowrap}"
     ".detail{padding:4px 16px 16px;font-size:13px}.jfull{margin:6px 0 8px}.jstep{padding:4px 0 4px 10px;border-left:3px solid var(--line);margin-left:2px}.jstep.done{border-color:var(--accent2);color:var(--muted)}.jstep.cur{border-color:var(--accent);font-weight:700}.jstep.future{color:var(--muted)}.jgoal{padding:6px 0 2px 13px;color:var(--accent);font-weight:700}"
-    ".ato{background:#2563eb0d;border-radius:8px;padding:7px 10px;margin:6px 0;font-size:12px}.tl{margin:8px 0}.tl b{font-size:12px;color:var(--muted)}.ti{padding:3px 0}.meta{font-size:11px;color:var(--muted);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}.apr-wrap{margin-bottom:24px}.apr{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--mid);border-radius:12px;padding:11px 14px;margin-bottom:8px;font-size:13px}.apr code{background:#0f1f33;color:#d6e6ff;padding:5px 9px;border-radius:6px;font-size:12px;white-space:nowrap}.apr-empty{color:var(--muted);font-size:13px}.apr.work{border-left-color:var(--accent)}.page{display:none}.page.active{display:block}.kpi{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;margin-bottom:22px}.kpi .box{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}.kpi .n{font-size:26px;font-weight:800;color:var(--accent)}.kpi .l{font-size:12px;color:var(--muted)}.kblock{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:16px;box-shadow:var(--shadow)}.kbar{display:flex;align-items:center;gap:10px;margin:7px 0;font-size:13px}.kbar .bn{width:96px;color:var(--muted)}.kbar .bt{flex:1;height:14px;background:var(--line);border-radius:7px;overflow:hidden}.kbar .bt i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}.kbar .bv{width:40px;text-align:right;font-weight:700}.setbox{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:14px;box-shadow:var(--shadow);font-size:13px;line-height:1.8}.setbox code{background:#2563eb12;color:var(--accent);padding:2px 6px;border-radius:5px;font-size:12px}.act-f{display:inline}.btn{cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:5px 11px;font-size:12px;font-weight:700;margin-right:6px}.btn:hover{filter:brightness(.97)}.btn.ok{background:var(--accent);color:#fff;border-color:var(--accent)}.btn.no{color:var(--hi);border-color:#f3c9d2}.btn.ph{background:var(--accent2);color:#fff;border-color:var(--accent2);font-size:11px;padding:3px 9px;margin-left:10px}.ov{position:fixed;inset:0;background:rgba(15,23,42,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:none;align-items:flex-start;justify-content:center;padding:48px 20px;z-index:50;overflow:auto}.ov.open{display:flex}.modal{background:var(--surface);border-radius:18px;max-width:720px;width:100%;padding:26px 30px;box-shadow:0 24px 70px rgba(0,0,0,.3);position:relative;animation:pop .14s ease-out}@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}.modal .mhead{font-size:20px;font-weight:800;margin:0 0 14px;padding-right:30px}.modal .jstep{font-size:14px;padding:6px 0 6px 12px}.modal .jgoal{font-size:14px}.modal .ti{padding:5px 0;font-size:14px}.modal .ato{font-size:13px}.modal .tl b{font-size:13px}.modal .meta{font-size:12px}.mx{position:absolute;top:12px;right:16px;border:none;background:transparent;font-size:26px;line-height:1;cursor:pointer;color:var(--muted)}.mx:hover{color:var(--ink)}.hint{color:var(--muted);font-size:11px;font-weight:400}.cmds{margin-top:8px}.cmds div{margin:6px 0;font-size:12px;color:var(--muted)}.cmds code{background:#0f1f33;color:#d6e6ff;padding:3px 7px;border-radius:5px;font-size:12px}.cmd{cursor:pointer}.cmd:hover{filter:brightness(1.25)}"
+    ".ato{background:#2563eb0d;border-radius:8px;padding:7px 10px;margin:6px 0;font-size:12px}.tl{margin:8px 0}.tl b{font-size:12px;color:var(--muted)}.ti{padding:3px 0}.meta{font-size:11px;color:var(--muted);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}.apr-wrap{margin-bottom:24px}.apr{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--mid);border-radius:12px;padding:11px 14px;margin-bottom:8px;font-size:13px}.apr code{background:#0f1f33;color:#d6e6ff;padding:5px 9px;border-radius:6px;font-size:12px;white-space:nowrap}.apr-empty{color:var(--muted);font-size:13px}.apr.work{border-left-color:var(--accent)}.apr.donep{border-left-color:#22c55e;background:linear-gradient(90deg,#22c55e0f,var(--surface))}.dpbadge{display:inline-block;background:#22c55e;color:#04210f;font-size:11px;font-weight:800;padding:2px 8px;border-radius:999px;margin-right:6px;vertical-align:middle}.page{display:none}.page.active{display:block}.kpi{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;margin-bottom:22px}.kpi .box{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}.kpi .n{font-size:26px;font-weight:800;color:var(--accent)}.kpi .l{font-size:12px;color:var(--muted)}.kblock{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:16px;box-shadow:var(--shadow)}.kbar{display:flex;align-items:center;gap:10px;margin:7px 0;font-size:13px}.kbar .bn{width:96px;color:var(--muted)}.kbar .bt{flex:1;height:14px;background:var(--line);border-radius:7px;overflow:hidden}.kbar .bt i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}.kbar .bv{width:40px;text-align:right;font-weight:700}.setbox{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:14px;box-shadow:var(--shadow);font-size:13px;line-height:1.8}.setbox code{background:#2563eb12;color:var(--accent);padding:2px 6px;border-radius:5px;font-size:12px}.act-f{display:inline}.btn{cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:5px 11px;font-size:12px;font-weight:700;margin-right:6px}.btn:hover{filter:brightness(.97)}.btn.ok{background:var(--accent);color:#fff;border-color:var(--accent)}.btn.no{color:var(--hi);border-color:#f3c9d2}.btn.ph{background:var(--accent2);color:#fff;border-color:var(--accent2);font-size:11px;padding:3px 9px;margin-left:10px}.ov{position:fixed;inset:0;background:rgba(15,23,42,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:none;align-items:flex-start;justify-content:center;padding:48px 20px;z-index:50;overflow:auto}.ov.open{display:flex}.modal{background:var(--surface);border-radius:18px;max-width:720px;width:100%;padding:26px 30px;box-shadow:0 24px 70px rgba(0,0,0,.3);position:relative;animation:pop .14s ease-out}@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}.modal .mhead{font-size:20px;font-weight:800;margin:0 0 14px;padding-right:30px}.modal .jstep{font-size:14px;padding:6px 0 6px 12px}.modal .jgoal{font-size:14px}.modal .ti{padding:5px 0;font-size:14px}.modal .ato{font-size:13px}.modal .tl b{font-size:13px}.modal .meta{font-size:12px}.mx{position:absolute;top:12px;right:16px;border:none;background:transparent;font-size:26px;line-height:1;cursor:pointer;color:var(--muted)}.mx:hover{color:var(--ink)}.hint{color:var(--muted);font-size:11px;font-weight:400}.cmds{margin-top:8px}.cmds div{margin:6px 0;font-size:12px;color:var(--muted)}.cmds code{background:#0f1f33;color:#d6e6ff;padding:3px 7px;border-radius:5px;font-size:12px}.cmd{cursor:pointer}.cmd:hover{filter:brightness(1.25)}"
     # ===== PHOENIX GOLDEN BIRD: ultimate skin (override) =====
     "@keyframes phx-shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}"
     "@keyframes phx-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,107,.55)}50%{box-shadow:0 0 0 7px rgba(255,59,107,0)}}"
     "@keyframes phx-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}"
     "@keyframes phx-flow{0%{background-position:0% 50%}100%{background-position:200% 50%}}"
     ".side{background:linear-gradient(180deg,#1a1024,#120c1d)!important;border-right:1px solid var(--line)!important;box-shadow:1px 0 24px rgba(255,106,19,.06)}"
-    ".brand{font-size:21px!important;background:linear-gradient(92deg,#ffe27a,#ffc629,#ff6a13,#ff3d2e,#ffc629);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:phx-shimmer 5s linear infinite;text-shadow:0 0 18px rgba(255,106,19,.25)}"
+    # 親(.brand)にはグラデ背景を載せない。-webkit-background-clip:text は「その要素の直下テキスト」に
+    # しか効かず、文字は子span(.brandtx)にあるため、親に載せると箱全体がオレンジ帯化＋文字が透明で消える。
+    # グラデ＋clip＋transparent＋fallback単色は .brandtx 自身に載せる（下の .brandtx 規則）。
+    ".brand{font-size:21px!important;background:none;text-shadow:0 0 18px rgba(255,106,19,.25)}"
     ".brand::after{content:' \\1F525\\1F426';-webkit-text-fill-color:initial;font-size:15px;display:inline-block;animation:phx-float 2.6s ease-in-out infinite}"
     ".brand:has(.brandlogo)::after{content:none}"
-    ".brandlogo{width:100%;max-width:188px;display:block;margin:0 auto 6px;border-radius:16px;box-shadow:0 0 28px rgba(255,106,19,.30),inset 0 0 0 1px rgba(255,198,41,.18);animation:phx-float 3.6s ease-in-out infinite}"
+    # 全テーマで画像ロゴを表示する div（背景画像はテーマ毎に _brand_css で切替）。正方タイルが崩れないよう aspect 1:1。
+    ".brandlogo{width:100%;max-width:188px;aspect-ratio:1/1;display:block;margin:0 auto 6px;border-radius:16px;background-size:contain;background-position:center;background-repeat:no-repeat;box-shadow:0 0 28px rgba(255,106,19,.30),inset 0 0 0 1px rgba(255,198,41,.18);animation:phx-float 3.6s ease-in-out infinite}"
     ".bgbtn{margin:14px 8px 0;width:calc(100% - 16px);cursor:pointer;border:1px solid rgba(255,198,41,.28);background:linear-gradient(160deg,var(--surface2),var(--surface));color:var(--ink);border-radius:10px;padding:8px 10px;font-size:12px;font-weight:700;transition:filter .15s,box-shadow .15s}.bgbtn:hover{filter:brightness(1.12);box-shadow:0 0 16px rgba(255,106,19,.3)}.bgbtn #bglabel{color:var(--accent)}"
     ".nav a.active{background:linear-gradient(90deg,rgba(255,198,41,.22),rgba(255,106,19,.10))!important;color:var(--accent)!important;box-shadow:inset 3px 0 0 var(--accent2)}"
     ".nav a:hover{background:rgba(255,198,41,.07)}"
-    ".main h1,.head h1{background:linear-gradient(92deg,#ffe9a8,#ffc629);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}"
+    # 挨拶グラデは h1(親箱)ではなく #greet(文字span自身)に載せる（clip:text は直下テキスト限定のため、
+    # 親に載せると箱がオレンジ帯化＋#greetは透明fillで不可視になる）。h1 は背景なし・fallback単色付き。
+    ".main h1,.head h1{background:none}"
+    ".main h1 #greet,.head h1 #greet{background-image:linear-gradient(92deg,#ffe9a8,#ffc629);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#ffc629}"
+    # 👋絵文字はグラデ text-clip の対象外（.wave は #greet の兄弟なので元々クリップされないが、明示的に保険）
+    ".main h1 .wave,.head h1 .wave{-webkit-text-fill-color:initial;-webkit-background-clip:border-box;background-clip:border-box;background:none}"
     ".momentum{background:linear-gradient(100deg,rgba(255,61,46,.14),rgba(255,106,19,.05) 45%,rgba(42,10,61,.2))!important;border:1px solid rgba(255,198,41,.22)!important;box-shadow:0 0 30px rgba(255,106,19,.08),inset 0 1px 0 rgba(255,255,255,.04)}"
     ".momentum .big{color:var(--accent)!important;text-shadow:0 0 14px rgba(255,198,41,.45)}"
     ".card,.kblock,.kpi .box,.setbox,.nowcard,.apr{background:linear-gradient(160deg,var(--surface2),var(--surface))!important}"
@@ -566,12 +1018,22 @@ DASH_CSS = (
     ".docs{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0 2px}.docchip{cursor:pointer;font-size:12px;background:#0f1f33;color:#d6e6ff;border:1px solid var(--line);border-radius:7px;padding:5px 9px}.docchip:hover{filter:brightness(1.25);border-color:var(--accent)}"
     # ----- Your-turn grouping (#1 too many, unstructured) -----
     ".grp{margin:12px 0 4px;font-size:12px;font-weight:800;color:var(--accent);display:flex;align-items:center;gap:8px}.grp .cnt{font-size:11px;color:var(--muted);font-weight:600}.grp:first-child{margin-top:0}"
+    # ----- Task grouping (design-grouping.md §3.1): group headings inside a project's task list -----
+    ".tgrp{margin:9px 0 3px;font-size:12px;font-weight:800;color:var(--accent);display:flex;align-items:center;gap:7px}.tgrp .cnt{font-size:11px;color:var(--muted);font-weight:600}.tl .tgrp:first-of-type{margin-top:2px}"
+    # ----- H4: 品質チップ（Evals横断）・外部リンク集（F3） -----
+    ".evalsbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}"
+    ".evalchip{font-size:12.5px;font-weight:700;padding:7px 12px;border-radius:10px;border:1px solid var(--line);background:var(--surface)}"
+    ".evalchip.ok{border-color:rgba(80,200,120,.45);color:#6fcf97}.evalchip.ng{border-color:rgba(255,59,107,.5);color:var(--hi)}.evalchip.skip{color:var(--muted);border-style:dashed}"
+    ".extlinks{margin:12px 8px 0;display:flex;flex-direction:column;gap:4px}"
+    ".extlinks a{font-size:12px;color:var(--muted);text-decoration:none;padding:6px 10px;border-radius:8px;border:1px dashed var(--line)}"
+    ".extlinks a:hover{color:var(--accent);border-color:var(--accent)}"
     # ===== 着せ替えテーマ（衛星/オルカ/風（山））— phoenix がデフォルト、以下は上書きブロック =====
     # 共通: テーマ切替ボタン／非phoenixではフェニックス専用装飾（鳥ロゴ・炎金写真・🎨ボタン）を無効化
     ".thbtn{margin:14px 8px 0;width:calc(100% - 16px);cursor:pointer;border:1px solid var(--line);background:linear-gradient(160deg,var(--surface2),var(--surface));color:var(--ink);border-radius:10px;padding:8px 10px;font-size:12px;font-weight:700;transition:filter .15s,box-shadow .15s}.thbtn:hover{filter:brightness(1.12)}.thbtn #thlabel{color:var(--accent)}"
-    ".brandtx{display:none}.brandtx::before{-webkit-text-fill-color:initial}"
-    ".brand:not(:has(.brandlogo)) .brandtx{display:inline}"
-    "body:not(.th-phoenix) .brandtx{display:inline}body:not(.th-phoenix) .brandlogo{display:none}"
+    # .brandtx(文字span自身)にグラデ＋clip＋transparent＋fallback単色を載せる（phoenix既定色）。
+    # ::before の絵文字はクリップ対象外。fallback color は clip 非対応時に透明化で消えない保険。
+    # 全テーマで画像ロゴ(.brandlogo)を表示するため、.brandtx は視覚非表示(sr-only)にしてアクセシブル名だけ維持。
+    ".brandtx{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}"
     "body:not(.th-phoenix) .brand::after{content:none}"
     "body:not(.th-phoenix) .bgbtn{display:none}"
     "body:not(.th-phoenix) .brand,body:not(.th-phoenix) .main h1,body:not(.th-phoenix) .head h1{text-shadow:none}"
@@ -579,11 +1041,11 @@ DASH_CSS = (
     "body.th-satellite{--bg:#050a16;--surface:#0c1526;--surface2:#122036;--ink:#dceafc;--muted:#8296b4;--line:#24374f;--accent:#5ec8ff;--accent2:#8f7bff;--ember:#3fa9f5;--hi:#ff5f8f;--mid:#ffc857;--low:#5f7189;--shadow:0 8px 28px rgba(0,0,0,.5),0 0 0 1px rgba(94,200,255,.05);"
     "background:radial-gradient(1000px 650px at 15% -10%,#0d2a52 0%,transparent 55%),radial-gradient(800px 550px at 90% 5%,#1b1145 0%,transparent 50%),radial-gradient(1100px 750px at 50% 120%,#071d38 0%,transparent 60%),var(--bg);background-attachment:fixed}"
     "body.th-satellite .side{background:linear-gradient(180deg,#0b1424,#08101d)!important;box-shadow:1px 0 24px rgba(94,200,255,.05)}"
-    "body.th-satellite .brand{background:linear-gradient(92deg,#bfe6ff,#5ec8ff,#8f7bff,#5ec8ff);background-size:200% auto;-webkit-background-clip:text;background-clip:text}"
+    "body.th-satellite .brandtx{background-image:linear-gradient(92deg,#bfe6ff,#5ec8ff,#8f7bff,#5ec8ff);background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:#5ec8ff}"
     "body.th-satellite .brandtx::before{content:'\\1F6F0\\FE0F  '}"
     "body.th-satellite .nav a.active{background:linear-gradient(90deg,rgba(94,200,255,.2),rgba(143,123,255,.1))!important;color:var(--accent)!important;box-shadow:inset 3px 0 0 var(--accent2)}"
     "body.th-satellite .nav a:hover{background:rgba(94,200,255,.07)}"
-    "body.th-satellite .main h1,body.th-satellite .head h1{background:linear-gradient(92deg,#dff1ff,#5ec8ff);-webkit-background-clip:text;background-clip:text}"
+    "body.th-satellite .main h1 #greet,body.th-satellite .head h1 #greet{background-image:linear-gradient(92deg,#dff1ff,#5ec8ff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#5ec8ff}"
     "body.th-satellite .momentum{background:linear-gradient(100deg,rgba(63,169,245,.13),rgba(143,123,255,.06) 45%,rgba(13,42,82,.25))!important;border:1px solid rgba(94,200,255,.22)!important;box-shadow:0 0 30px rgba(94,200,255,.07)}"
     "body.th-satellite .momentum::after{background:linear-gradient(90deg,#5ec8ff,#8f7bff,#5ec8ff);background-size:200% 100%;animation:phx-flow 3s linear infinite;box-shadow:0 0 12px rgba(94,200,255,.7)}"
     "body.th-satellite .momentum .big{color:var(--accent)!important;text-shadow:0 0 14px rgba(94,200,255,.45)}"
@@ -602,11 +1064,11 @@ DASH_CSS = (
     "body.th-orca{--bg:#04090e;--surface:#0b141c;--surface2:#101d28;--ink:#e8f2f8;--muted:#7e93a1;--line:#1e3240;--accent:#6fd8ff;--accent2:#bfeafc;--ember:#4ab3d8;--hi:#ff6b81;--mid:#ffb454;--low:#54707f;--shadow:0 8px 28px rgba(0,0,0,.55),0 0 0 1px rgba(111,216,255,.04);"
     "background:radial-gradient(1000px 700px at 50% 120%,#0c3146 0%,transparent 60%),radial-gradient(700px 500px at 85% -5%,#0a1e2c 0%,transparent 55%),linear-gradient(180deg,#071119,var(--bg));background-attachment:fixed}"
     "body.th-orca .side{background:linear-gradient(180deg,#0a141c,#060d13)!important;box-shadow:1px 0 24px rgba(111,216,255,.05)}"
-    "body.th-orca .brand{background:linear-gradient(92deg,#ffffff,#bfeafc,#6fd8ff,#ffffff);background-size:200% auto;-webkit-background-clip:text;background-clip:text}"
+    "body.th-orca .brandtx{background-image:linear-gradient(92deg,#ffffff,#bfeafc,#6fd8ff,#ffffff);background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:#bfeafc}"
     "body.th-orca .brandtx::before{content:'\\1F40B '}"
     "body.th-orca .nav a.active{background:linear-gradient(90deg,rgba(111,216,255,.18),rgba(255,255,255,.06))!important;color:var(--accent)!important;box-shadow:inset 3px 0 0 var(--accent)}"
     "body.th-orca .nav a:hover{background:rgba(111,216,255,.06)}"
-    "body.th-orca .main h1,body.th-orca .head h1{background:linear-gradient(92deg,#ffffff,#6fd8ff);-webkit-background-clip:text;background-clip:text}"
+    "body.th-orca .main h1 #greet,body.th-orca .head h1 #greet{background-image:linear-gradient(92deg,#ffffff,#6fd8ff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#6fd8ff}"
     "body.th-orca .momentum{background:linear-gradient(100deg,rgba(111,216,255,.12),rgba(255,255,255,.04) 45%,rgba(12,49,70,.3))!important;border:1px solid rgba(111,216,255,.2)!important;box-shadow:0 0 30px rgba(111,216,255,.06)}"
     "body.th-orca .momentum::after{background:linear-gradient(90deg,#6fd8ff,#ffffff,#6fd8ff);background-size:200% 100%;animation:phx-flow 3.2s linear infinite;box-shadow:0 0 12px rgba(111,216,255,.6)}"
     "body.th-orca .momentum .big{color:var(--accent)!important;text-shadow:0 0 14px rgba(111,216,255,.4)}"
@@ -625,11 +1087,11 @@ DASH_CSS = (
     "body.th-wind{--bg:#eef4f1;--surface:#ffffff;--surface2:#f3faf6;--ink:#26343c;--muted:#6d8089;--line:#d5e2de;--accent:#2f8f76;--accent2:#5aa9d6;--ember:#4a9e8a;--hi:#e05c7a;--mid:#e8a13c;--low:#9fb0ac;--shadow:0 8px 24px rgba(70,110,100,.12),0 0 0 1px rgba(47,143,118,.04);"
     "background:linear-gradient(180deg,#d8e9f4 0%,#eef4f1 45%,#e4efe8 100%);background-attachment:fixed}"
     "body.th-wind .side{background:linear-gradient(180deg,#f7fbf9,#eef4f0)!important;box-shadow:1px 0 18px rgba(70,110,100,.08)}"
-    "body.th-wind .brand{background:linear-gradient(92deg,#2b6a58,#2f8f76,#5aa9d6);background-size:200% auto;-webkit-background-clip:text;background-clip:text}"
+    "body.th-wind .brandtx{background-image:linear-gradient(92deg,#2b6a58,#2f8f76,#5aa9d6);background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:#2f8f76}"
     "body.th-wind .brandtx::before{content:'\\1F3D4\\FE0F  '}"
     "body.th-wind .nav a.active{background:linear-gradient(90deg,rgba(47,143,118,.14),rgba(90,169,214,.08))!important;color:var(--accent)!important;box-shadow:inset 3px 0 0 var(--accent2)}"
     "body.th-wind .nav a:hover{background:rgba(47,143,118,.06)}"
-    "body.th-wind .main h1,body.th-wind .head h1{background:linear-gradient(92deg,#2b6a58,#3d7fa8);-webkit-background-clip:text;background-clip:text}"
+    "body.th-wind .main h1 #greet,body.th-wind .head h1 #greet{background-image:linear-gradient(92deg,#2b6a58,#3d7fa8);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#2f8f76}"
     "body.th-wind .momentum{background:linear-gradient(100deg,rgba(90,169,214,.12),rgba(255,255,255,.6) 45%,rgba(47,143,118,.08))!important;border:1px solid rgba(47,143,118,.22)!important;box-shadow:0 4px 18px rgba(70,110,100,.1)}"
     "body.th-wind .momentum::after{background:linear-gradient(90deg,#2f8f76,#5aa9d6,#2f8f76);background-size:200% 100%;animation:phx-flow 3.4s linear infinite;box-shadow:0 0 10px rgba(47,143,118,.4)}"
     "body.th-wind .momentum .big{color:var(--accent)!important;text-shadow:none}"
@@ -646,13 +1108,238 @@ DASH_CSS = (
     "body.th-wind *::-webkit-scrollbar-thumb{background:linear-gradient(var(--accent),var(--accent2))}body.th-wind *::-webkit-scrollbar-track{background:#e2ece8}"
     "body.th-wind .embers i{background:linear-gradient(135deg,#a9d8b8,#6db98a);border-radius:62% 38% 55% 45%;box-shadow:none;animation-name:leaf-drift}"
     "@keyframes leaf-drift{0%{transform:translate(0,-2vh) rotate(0deg);opacity:0}12%{opacity:.75}55%{transform:translate(var(--dx),-52vh) rotate(160deg);opacity:.6}100%{transform:translate(calc(var(--dx)*-1),-104vh) rotate(320deg);opacity:0}}"
+    # ===== 反対カラー4バリアント（白フェニックス/衛星・暁/オルカ・浅瀬/風・夜）=====
+    # 各バリアントは兄弟テーマの構造を反転パレットで踏襲。gradientは可能な限り var(--accent) 系を使用。
+    # ----- 白フェニックス（phoenix明）: アイボリー地＋金・炎アクセント -----
+    "body.th-phoenix-l{--bg:#fbf6ec;--surface:#fffdf8;--surface2:#fdf3e2;--ink:#3a2a18;--muted:#9a8360;--line:#ecdcc2;--accent:#e8920f;--accent2:#ff6a13;--ember:#d63a1e;--hi:#e0325a;--mid:#e8920f;--low:#b7a582;--shadow:0 8px 24px rgba(180,120,40,.15),0 0 0 1px rgba(232,146,15,.06);"
+    "background:radial-gradient(1100px 700px at 12% -8%,#ffe9c7 0%,transparent 55%),radial-gradient(900px 600px at 92% 0%,#ffdcb4 0%,transparent 50%),linear-gradient(180deg,#fffaf0,#fbf6ec);background-attachment:fixed}"
+    "body.th-phoenix-l .side{background:linear-gradient(180deg,#fffaf0,#fdf3e2)!important;box-shadow:1px 0 18px rgba(200,140,50,.08)}"
+    "body.th-phoenix-l .brandtx{background-image:linear-gradient(92deg,#e0620f,#e8920f,#ff6a13,#c0392b,#e8920f)!important;background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:#c0392b}"
+    "body.th-phoenix-l .brandtx::before{content:'\\1F525  '}"
+    "body.th-phoenix-l .main h1 #greet,body.th-phoenix-l .head h1 #greet{background-image:linear-gradient(92deg,#c0392b,#e8920f)!important;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#c0392b}"
+    "body.th-phoenix-l .momentum{background:linear-gradient(100deg,rgba(255,106,19,.10),rgba(255,255,255,.6) 45%,rgba(232,146,15,.10))!important;border:1px solid rgba(232,146,15,.28)!important;box-shadow:0 4px 18px rgba(200,140,50,.12)}"
+    "body.th-phoenix-l .momentum .big,body.th-phoenix-l .kpi .n{text-shadow:none}"
+    "body.th-phoenix-l .btn.ok{color:#fff!important}"
+    "body.th-phoenix-l .card.overdue,body.th-phoenix-l .nowcard.overdue{background:linear-gradient(160deg,#fde8e0,#fff)!important;border-color:rgba(214,58,30,.5)!important}"
+    "body.th-phoenix-l .ov{background:rgba(140,90,40,.26)}"
+    "body.th-phoenix-l ::selection{background:rgba(255,106,19,.28);color:#3a2a18}"
+    "body.th-phoenix-l .modal{border-color:rgba(232,146,15,.25)}"
+    "body.th-phoenix-l *::-webkit-scrollbar-track{background:#f3e6cf}"
+    "body.th-phoenix-l .embers i{background:radial-gradient(circle,#ffd75e 0%,#ff8a2b 40%,#e0530f 68%,transparent 74%);box-shadow:0 0 7px 1px rgba(224,83,15,.55)}"
+    # ----- 衛星・暁（satellite明）: 淡い水色→白のグラデ（軌道から見た夜明け・成層圏） -----
+    "body.th-satellite-l{--bg:#dfeefc;--surface:#ffffff;--surface2:#eef6ff;--ink:#26384f;--muted:#6d84a3;--line:#d2e2f4;--accent:#2f80d8;--accent2:#7b6fe0;--ember:#4a9be8;--hi:#e0507f;--mid:#e8a13c;--low:#9db1cb;--shadow:0 8px 24px rgba(80,120,180,.14),0 0 0 1px rgba(47,128,216,.05);"
+    "background:linear-gradient(180deg,#eaf4ff 0%,#dfeefc 42%,#ffffff 100%);background-attachment:fixed}"
+    "body.th-satellite-l .side{background:linear-gradient(180deg,#f4f9ff,#e9f2fc)!important;box-shadow:1px 0 18px rgba(80,120,180,.08)}"
+    "body.th-satellite-l .brandtx{background-image:linear-gradient(92deg,#2f80d8,#7b6fe0,#2f80d8)!important;background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:#2f80d8}"
+    "body.th-satellite-l .brandtx::before{content:'\\1F305  '}"
+    "body.th-satellite-l .nav a.active{background:linear-gradient(90deg,rgba(47,128,216,.14),rgba(123,111,224,.08))!important;color:var(--accent)!important;box-shadow:inset 3px 0 0 var(--accent2)}"
+    "body.th-satellite-l .nav a:hover{background:rgba(47,128,216,.06)}"
+    "body.th-satellite-l .main h1 #greet,body.th-satellite-l .head h1 #greet{background-image:linear-gradient(92deg,#2f80d8,#7b6fe0)!important;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#2f80d8}"
+    "body.th-satellite-l .momentum{background:linear-gradient(100deg,rgba(47,128,216,.10),rgba(255,255,255,.6) 45%,rgba(123,111,224,.08))!important;border:1px solid rgba(47,128,216,.24)!important;box-shadow:0 4px 18px rgba(80,120,180,.1)}"
+    "body.th-satellite-l .momentum::after{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent))!important;box-shadow:0 0 10px rgba(47,128,216,.4)}"
+    "body.th-satellite-l .momentum .big,body.th-satellite-l .kpi .n{color:var(--accent)!important;text-shadow:none}"
+    "body.th-satellite-l .bar i,body.th-satellite-l .kbar .bt i,body.th-satellite-l .seg.done{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent))!important;background-size:200% auto;box-shadow:none}"
+    "body.th-satellite-l .btn.ok{background:linear-gradient(92deg,#2f80d8,#7b6fe0)!important;color:#fff!important;box-shadow:0 3px 12px rgba(47,128,216,.3)}"
+    "body.th-satellite-l .btn.ph{background:linear-gradient(92deg,#7b6fe0,#5e6dff)!important;color:#fff!important}"
+    "body.th-satellite-l .next{background:rgba(47,128,216,.08)!important;border:1px solid rgba(47,128,216,.15)}"
+    "body.th-satellite-l .nowcard code,body.th-satellite-l .setbox code{background:rgba(47,128,216,.1)!important;color:var(--accent)!important}"
+    "body.th-satellite-l .undobtn{border-color:var(--line)}body.th-satellite-l .modal{border-color:rgba(47,128,216,.2)}"
+    "body.th-satellite-l .ov{background:rgba(80,110,150,.28)}"
+    "body.th-satellite-l .card.overdue,body.th-satellite-l .nowcard.overdue{background:linear-gradient(160deg,#fdeef2,#fff)!important;border-color:rgba(224,80,127,.5)!important}"
+    "body.th-satellite-l ::selection{background:rgba(47,128,216,.22)}"
+    "body.th-satellite-l *::-webkit-scrollbar-thumb{background:linear-gradient(var(--accent),var(--accent2))}body.th-satellite-l *::-webkit-scrollbar-track{background:#e4eef9}"
+    "body.th-satellite-l .embers i{background:radial-gradient(circle,#fff6d6,#ffd98a 55%,transparent 75%);box-shadow:0 0 5px 1px rgba(255,200,120,.6);animation-name:star-drift}"
+    # ----- オルカ・浅瀬（orca明）: 明るいターコイズ/アクア/砂浜 -----
+    "body.th-orca-l{--bg:#e6f7f6;--surface:#ffffff;--surface2:#f0fbfa;--ink:#123b40;--muted:#5f8a8e;--line:#cbebe8;--accent:#0f9bb3;--accent2:#17c0b6;--ember:#2bb5c9;--hi:#e0607a;--mid:#e8a13c;--low:#9cc0be;--shadow:0 8px 24px rgba(40,150,150,.14),0 0 0 1px rgba(15,155,179,.05);"
+    "background:radial-gradient(1000px 700px at 50% 120%,#c7ecef 0%,transparent 60%),radial-gradient(700px 500px at 88% -5%,#ffe9cf 0%,transparent 55%),linear-gradient(180deg,#eefbfa,#e6f7f6);background-attachment:fixed}"
+    "body.th-orca-l .side{background:linear-gradient(180deg,#f2fcfb,#e8f7f6)!important;box-shadow:1px 0 18px rgba(40,150,150,.08)}"
+    "body.th-orca-l .brandtx{background-image:linear-gradient(92deg,#0f9bb3,#17c0b6,#0f9bb3)!important;background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:#0f9bb3}"
+    "body.th-orca-l .brandtx::before{content:'\\1F41A '}"
+    "body.th-orca-l .nav a.active{background:linear-gradient(90deg,rgba(15,155,179,.14),rgba(23,192,182,.08))!important;color:var(--accent)!important;box-shadow:inset 3px 0 0 var(--accent)}"
+    "body.th-orca-l .nav a:hover{background:rgba(15,155,179,.06)}"
+    "body.th-orca-l .main h1 #greet,body.th-orca-l .head h1 #greet{background-image:linear-gradient(92deg,#0f9bb3,#17c0b6)!important;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#0f9bb3}"
+    "body.th-orca-l .momentum{background:linear-gradient(100deg,rgba(15,155,179,.10),rgba(255,255,255,.6) 45%,rgba(255,202,122,.12))!important;border:1px solid rgba(15,155,179,.22)!important;box-shadow:0 4px 18px rgba(40,150,150,.1)}"
+    "body.th-orca-l .momentum::after{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent))!important;box-shadow:0 0 10px rgba(15,155,179,.4)}"
+    "body.th-orca-l .momentum .big,body.th-orca-l .kpi .n{color:var(--accent)!important;text-shadow:none}"
+    "body.th-orca-l .bar i,body.th-orca-l .kbar .bt i,body.th-orca-l .seg.done{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent))!important;background-size:200% auto;box-shadow:none}"
+    "body.th-orca-l .btn.ok{background:linear-gradient(92deg,#0f9bb3,#17c0b6)!important;color:#fff!important;box-shadow:0 3px 12px rgba(15,155,179,.3)}"
+    "body.th-orca-l .btn.ph{background:linear-gradient(92deg,#17c0b6,#0f9bb3)!important;color:#fff!important}"
+    "body.th-orca-l .next{background:rgba(15,155,179,.08)!important;border:1px solid rgba(15,155,179,.15)}"
+    "body.th-orca-l .nowcard code,body.th-orca-l .setbox code{background:rgba(15,155,179,.1)!important;color:var(--accent)!important}"
+    "body.th-orca-l .undobtn{border-color:var(--line)}body.th-orca-l .modal{border-color:rgba(15,155,179,.2)}"
+    "body.th-orca-l .ov{background:rgba(40,110,110,.28)}"
+    "body.th-orca-l .card.overdue,body.th-orca-l .nowcard.overdue{background:linear-gradient(160deg,#fdeef1,#fff)!important;border-color:rgba(224,96,122,.5)!important}"
+    "body.th-orca-l ::selection{background:rgba(15,155,179,.22)}"
+    "body.th-orca-l *::-webkit-scrollbar-thumb{background:linear-gradient(var(--accent),var(--accent2))}body.th-orca-l *::-webkit-scrollbar-track{background:#dcefee}"
+    "body.th-orca-l .embers i{background:radial-gradient(circle at 32% 30%,rgba(255,255,255,.8),rgba(23,192,182,.15) 50%,transparent 72%);border:1px solid rgba(15,155,179,.3);box-shadow:inset 0 0 4px rgba(255,255,255,.4);animation-name:bubble-rise}"
+    # ----- 風・夜（wind暗）: 藍/インディゴの夜山 -----
+    "body.th-wind-d{--bg:#0e1530;--surface:#161f42;--surface2:#1d2a54;--ink:#dce4fb;--muted:#8a97c4;--line:#2c3866;--accent:#8fa6ff;--accent2:#6f7fe0;--ember:#5a6fd6;--hi:#ff6b95;--mid:#ffc857;--low:#5d6a99;--shadow:0 8px 28px rgba(0,0,0,.5),0 0 0 1px rgba(143,166,255,.05);"
+    "background:radial-gradient(1000px 700px at 20% -8%,#1b2a5c 0%,transparent 55%),radial-gradient(800px 600px at 90% 10%,#241a52 0%,transparent 50%),linear-gradient(180deg,#0e1530,#0a1024);background-attachment:fixed}"
+    "body.th-wind-d .side{background:linear-gradient(180deg,#131c40,#0c1330)!important;box-shadow:1px 0 24px rgba(143,166,255,.05)}"
+    "body.th-wind-d .brandtx{background-image:linear-gradient(92deg,#bcc9ff,#8fa6ff,#6f7fe0,#8fa6ff)!important;background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:#8fa6ff}"
+    "body.th-wind-d .brandtx::before{content:'\\1F319  '}"
+    "body.th-wind-d .nav a.active{background:linear-gradient(90deg,rgba(143,166,255,.2),rgba(111,127,224,.1))!important;color:var(--accent)!important;box-shadow:inset 3px 0 0 var(--accent2)}"
+    "body.th-wind-d .nav a:hover{background:rgba(143,166,255,.07)}"
+    "body.th-wind-d .main h1 #greet,body.th-wind-d .head h1 #greet{background-image:linear-gradient(92deg,#dbe4ff,#8fa6ff)!important;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#8fa6ff}"
+    "body.th-wind-d .momentum{background:linear-gradient(100deg,rgba(143,166,255,.13),rgba(111,127,224,.06) 45%,rgba(20,26,60,.3))!important;border:1px solid rgba(143,166,255,.22)!important;box-shadow:0 0 30px rgba(143,166,255,.07)}"
+    "body.th-wind-d .momentum::after{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent))!important;box-shadow:0 0 12px rgba(143,166,255,.6)}"
+    "body.th-wind-d .momentum .big,body.th-wind-d .kpi .n{color:var(--accent)!important;text-shadow:0 0 14px rgba(143,166,255,.4)}"
+    "body.th-wind-d .bar i,body.th-wind-d .kbar .bt i,body.th-wind-d .seg.done{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent))!important;background-size:200% auto;box-shadow:0 0 8px rgba(143,166,255,.5)}"
+    "body.th-wind-d .btn.ok{background:linear-gradient(92deg,#8fa6ff,#6f7fe0)!important;color:#0a1024!important;box-shadow:0 3px 14px rgba(143,166,255,.35)}"
+    "body.th-wind-d .btn.ph{background:linear-gradient(92deg,#6f7fe0,#5e6dff)!important;color:#fff!important}"
+    "body.th-wind-d .next{background:rgba(143,166,255,.09)!important;border:1px solid rgba(143,166,255,.16)}"
+    "body.th-wind-d .nowcard code,body.th-wind-d .setbox code{background:rgba(143,166,255,.1)!important;color:var(--accent)!important}"
+    "body.th-wind-d .undobtn{border-color:var(--line)}body.th-wind-d .modal{border-color:rgba(143,166,255,.2)}"
+    "body.th-wind-d ::selection{background:rgba(143,166,255,.32)}"
+    "body.th-wind-d *::-webkit-scrollbar-thumb{background:linear-gradient(var(--accent),var(--accent2))}body.th-wind-d *::-webkit-scrollbar-track{background:#0c1330}"
+    "body.th-wind-d .embers i{background:linear-gradient(135deg,#7d90d6,#4a5aa8);border-radius:62% 38% 55% 45%;box-shadow:0 0 5px rgba(143,166,255,.4);animation-name:leaf-drift}"
+    # ===== 追加エフェクト（fxfield）: orca=大きな泡 / satellite=小石(無重力) / wind=風の筋＋葉 =====
+    # 既定は全て display:none。各テーマが自分の粒子だけ display:block にする（非表示要素はアニメせず軽量）。
+    ".fxfield{position:fixed;inset:0;pointer-events:none;z-index:1;overflow:hidden}"
+    ".fxfield .fx{position:absolute;display:none;will-change:transform,opacity}"
+    "body.th-orca .fxfield .bubble,body.th-orca-l .fxfield .bubble{display:block}"
+    "body.th-satellite .fxfield .pebble,body.th-satellite-l .fxfield .pebble{display:block}"
+    "body.th-wind .fxfield .streak,body.th-wind-d .fxfield .streak,body.th-wind .fxfield .leaf,body.th-wind-d .fxfield .leaf{display:block}"
+    # 大きな水のあわ（ゆっくり上昇・半透明）
+    ".fxfield .bubble{bottom:-14vh;border-radius:50%;background:radial-gradient(circle at 34% 30%,rgba(255,255,255,.42),rgba(150,220,255,.10) 55%,rgba(120,200,240,.04) 72%,transparent 74%);border:1px solid rgba(190,235,255,.30);box-shadow:inset 0 0 14px rgba(255,255,255,.22);animation-name:orca-bubble;animation-timing-function:ease-in-out;animation-iteration-count:infinite}"
+    "body.th-orca-l .fxfield .bubble{background:radial-gradient(circle at 34% 30%,rgba(255,255,255,.55),rgba(23,192,182,.14) 55%,transparent 74%);border-color:rgba(15,155,179,.32)}"
+    "@keyframes orca-bubble{0%{transform:translate(0,0) scale(.7);opacity:0}12%{opacity:.5}50%{transform:translate(var(--dx),-60vh) scale(1)}88%{opacity:.4}100%{transform:translate(calc(var(--dx)*-1),-124vh) scale(1.15);opacity:0}}"
+    # 小石（斜めにゆっくり流れる＝無重力感）
+    ".fxfield .pebble{top:0;width:5px;height:5px;border-radius:42% 58% 50% 45%;background:linear-gradient(135deg,#c7d2e0,#8494a8);box-shadow:0 0 4px rgba(180,200,230,.5);animation-name:sat-pebble;animation-timing-function:linear;animation-iteration-count:infinite}"
+    "body.th-satellite-l .fxfield .pebble{background:linear-gradient(135deg,#9aa8c0,#5f6f88);box-shadow:0 0 4px rgba(120,140,175,.45)}"
+    "@keyframes sat-pebble{0%{transform:translate(-8vw,8vh) rotate(0);opacity:0}10%{opacity:.85}90%{opacity:.65}100%{transform:translate(64vw,-92vh) rotate(200deg);opacity:0}}"
+    # 風の筋（横に流れる）
+    ".fxfield .streak{height:2px;border-radius:2px;background:linear-gradient(90deg,transparent,rgba(90,169,214,.5),transparent);animation-name:wind-streak;animation-timing-function:ease-in-out;animation-iteration-count:infinite}"
+    "body.th-wind-d .fxfield .streak{background:linear-gradient(90deg,transparent,rgba(143,166,255,.5),transparent)}"
+    "@keyframes wind-streak{0%{transform:translateX(-40vw);opacity:0}12%{opacity:.7}88%{opacity:.5}100%{transform:translateX(132vw);opacity:0}}"
+    # たまに葉っぱ（横に流れる・回転）
+    ".fxfield .leaf{width:9px;height:9px;background:linear-gradient(135deg,#a9d8b8,#5aa06f);border-radius:62% 38% 55% 45%;animation-name:wind-leaf;animation-timing-function:linear;animation-iteration-count:infinite}"
+    "body.th-wind-d .fxfield .leaf{background:linear-gradient(135deg,#3a6b8a,#2b4a6b)}"
+    "@keyframes wind-leaf{0%{transform:translate(-12vw,0) rotate(0);opacity:0}12%{opacity:.85}50%{transform:translate(56vw,-5vh) rotate(180deg)}100%{transform:translate(132vw,4vh) rotate(360deg);opacity:0}}"
+    # ===== テーマタイル（選択UI）: サイドバーのテーマボタンで開く 8タイルのグリッド =====
+    ".thgrid{display:none;grid-template-columns:1fr 1fr;gap:7px;margin:10px 8px 0}"
+    ".thgrid.open{display:grid}"
+    ".thtile{cursor:pointer;text-align:center;border:1px solid var(--line);border-radius:10px;padding:8px 6px;color:#fff;font-size:11px;font-weight:700;position:relative;overflow:hidden;transition:transform .12s,box-shadow .12s;text-shadow:0 1px 3px rgba(0,0,0,.55)}"
+    ".thtile:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(0,0,0,.35)}"
+    ".thtile.sel{outline:2px solid #fff;outline-offset:-2px}"
+    ".thtile .themb{min-height:46px;display:flex;align-items:center;justify-content:center;margin-bottom:4px}"
+    ".thtile .themb svg{height:40px;width:auto;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45))}"
+    ".thtile .thlogo{display:block;width:40px;height:40px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.35)}"
+    ".thtile .thimg{display:block;width:46px;height:46px;border-radius:9px;object-fit:cover;box-shadow:0 2px 8px rgba(0,0,0,.4)}"
+    ".thtile .thnm{display:block;line-height:1.2}"
+    # ===== prefers-reduced-motion 尊重: 装飾アニメと粒子/エフェクトを抑制 =====
+    "@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition-duration:.001s!important}.embers,.fxfield{display:none!important}}"
     "</style>"
 )
 
 
+def _fx_html() -> str:
+    """テーマ別エフェクト粒子（大きな泡/小石/風の筋/葉）。全て自己完結・決定論パラメータ。
+    既定は CSS で display:none。表示テーマだけが自分の粒子を出す（非表示要素はアニメしない）。"""
+    out = []
+    # 大きな泡（orca）: 24..64px・ゆっくり(14..26s)・半透明
+    for i in range(9):
+        left = (i * 4691) % 100
+        size = 24 + (i * 11) % 40
+        dur = 14 + (i * 7) % 13
+        delay = (i * 9) % 20
+        drift = -40 + (i * 23) % 80
+        out.append(f'<i class="fx bubble" style="left:{left}%;width:{size}px;height:{size}px;'
+                   f'animation-duration:{dur}s;animation-delay:-{delay}s;--dx:{drift}px"></i>')
+    # 小石（satellite）: 斜めにゆっくり(18..34s)
+    for i in range(14):
+        top = (i * 3697) % 100
+        size = 3 + (i * 3) % 5
+        dur = 18 + (i * 5) % 17
+        delay = (i * 11) % 30
+        out.append(f'<i class="fx pebble" style="top:{top}%;width:{size}px;height:{size}px;'
+                   f'animation-duration:{dur}s;animation-delay:-{delay}s"></i>')
+    # 風の筋（wind）: 横に流れる(6..12s)
+    for i in range(7):
+        top = 6 + (i * 13) % 88
+        w = 90 + (i * 37) % 150
+        dur = 6 + (i * 3) % 7
+        delay = (i * 5) % 10
+        out.append(f'<i class="fx streak" style="top:{top}%;width:{w}px;'
+                   f'animation-duration:{dur}s;animation-delay:-{delay}s"></i>')
+    # 葉っぱ（wind・たまに）: 横に流れる(11..19s)
+    for i in range(8):
+        top = (i * 5099) % 90
+        dur = 11 + (i * 7) % 9
+        delay = (i * 13) % 22
+        out.append(f'<i class="fx leaf" style="top:{top}%;'
+                   f'animation-duration:{dur}s;animation-delay:-{delay}s"></i>')
+    return '<div class="fxfield" aria-hidden="true">' + "".join(out) + "</div>"
+
+
+def _tile_emblem(cls: str, c: tuple) -> str:
+    """タイルのモチーフ=デザインされたエンブレム。黒フェニックスは実ロゴ(CSS背景・base64は1回だけ埋込)、
+    他の7テーマは Canva製のブランドタイル画像(data URI)。画像欠落時はテーマ配色のインラインSVGへ退避。
+    （宇宙=軌道/惑星, orca=クジラ/波, wind=山/月）。CSP自己完結=すべて data URI。"""
+    base = cls[:-2] if cls.endswith(("-l", "-d")) else cls
+    c0, c1, c2 = c
+    # 黒フェニックス以外: 各テーマ専用の Canva タイル画像を出す（黒フェニックスは既存ロゴのまま）。
+    timg = THEME_TILE_IMG.get(cls)
+    if timg is not None and timg.exists():
+        b64 = base64.b64encode(timg.read_bytes()).decode("ascii")
+        return (f'<img class="thimg" src="data:image/jpeg;base64,{b64}" '
+                f'alt="" aria-hidden="true" loading="lazy">')
+    if cls == "th-phoenix":
+        if LOGO.exists():
+            return '<span class="thlogo" aria-hidden="true"></span>'   # 左上と同じフェニックスCanvaロゴ
+    if base == "th-phoenix":
+        # ロゴ/タイル画像 欠落時のフォールバック=炎のSVG
+        return (f'<svg viewBox="0 0 76 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+                f'<path d="M38 5c7 9 2 13 5 18 2-2 3-6 2-9 5 5 8 11 8 17a17 17 0 1 1-34 0c0-7 5-13 11-17-2 5 0 8 2 10-3-9 4-14 6-19z" fill="{c1}"/>'
+                f'<path d="M38 17c3 4 1 7 2 10 3-2 4-6 3-9 2 3 3 6 3 9a9 9 0 1 1-18 0c0-4 3-8 7-10-1 3 0 5 1 6-1-5 0-11 2-16z" fill="{c0}"/></svg>')
+    if base == "th-satellite":   # 軌道と惑星＋星（宇宙）
+        return (f'<svg viewBox="0 0 76 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+                f'<circle cx="12" cy="9" r="1.3" fill="#fff" opacity=".85"/>'
+                f'<circle cx="64" cy="34" r="1" fill="#fff" opacity=".7"/>'
+                f'<circle cx="54" cy="7" r="1" fill="#fff" opacity=".6"/>'
+                f'<ellipse cx="38" cy="23" rx="30" ry="10" fill="none" stroke="{c0}" stroke-width="2" opacity=".75"/>'
+                f'<circle cx="38" cy="23" r="11" fill="{c2}"/>'
+                f'<path d="M27 23a11 11 0 0 1 22 0z" fill="{c1}" opacity=".55"/>'
+                f'<circle cx="9" cy="18" r="2.6" fill="{c1}"/></svg>')
+    if base == "th-orca":        # クジラ＋波
+        return (f'<svg viewBox="0 0 76 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+                f'<path d="M4 34q9-5 18 0t18 0 18 0 14 0" fill="none" stroke="{c0}" stroke-width="2" opacity=".45"/>'
+                f'<path d="M16 24C16 15 30 12 41 15 52 18 60 21 66 21 60 27 52 28 46 27 47 31 44 33 40 32 38 30 38 27 39 25 30 27 21 27 16 24Z" fill="{c0}"/>'
+                f'<path d="M41 26c6 0 12-1 20-4-5 5-12 7-19 6z" fill="{c2}" opacity=".9"/>'
+                f'<circle cx="25" cy="21" r="1.6" fill="#fff"/>'
+                f'<path d="M41 15q1-6 4-9 2 4 0 9z" fill="{c1}"/></svg>')
+    # th-wind: 山＋太陽/月＋風の筋
+    return (f'<svg viewBox="0 0 76 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+            f'<circle cx="59" cy="12" r="6" fill="{c2}" opacity=".9"/>'
+            f'<path d="M0 42 20 16 34 42Z" fill="{c0}"/>'
+            f'<path d="M22 42 44 10 66 42Z" fill="{c1}"/>'
+            f'<path d="M38 20 44 12 50 20 46 18 44 22 42 18Z" fill="#fff" opacity=".92"/>'
+            f'<path d="M5 30q11-3 21 0" stroke="#fff" stroke-width="1.5" fill="none" opacity=".5"/></svg>')
+
+
+def _theme_tiles_html() -> str:
+    """テーマタイル（選択UI）: 8タイルのミニプレビュー。各タイル=テーマ背景＋中央エンブレム＋名前。
+    クリックで applyTheme・localStorage永続。THEMES/THEME_TILES が単一の正。CSP自己完結。"""
+    # 黒フェニックスのタイルは実ロゴ png を CSS変数 --logo-png（_brand_css で1回だけ埋込）から参照（肥大回避）。
+    style = ('<style>.thtile .thlogo{background-image:var(--logo-png);'
+             'background-size:contain;background-repeat:no-repeat;background-position:center}</style>')
+    tiles = []
+    for cls, label in THEMES:
+        bg, sw, _fx = THEME_TILES[cls]
+        emb = _tile_emblem(cls, sw)
+        tiles.append(
+            f'<button class="thtile" data-th="{cls}" onclick="applyTheme(\'{cls}\')" '
+            f'style="background:{bg}"><span class="themb">{emb}</span>'
+            f'<span class="thnm">{label}</span></button>')
+    return style + '<div id="thgrid" class="thgrid">' + "".join(tiles) + "</div>"
+
+
 def _dash_stats(state):
     tk = [t for p in state["projects"] for t in p.get("tasks", [])]
+    parked = sum(1 for p in state["projects"] if is_parked(p))
     return {"projects": len(state["projects"]),
+            "active_n": len(state["projects"]) - parked,
+            "parked_n": parked,
             "todo": sum(t.get("status") == "todo" for t in tk),
             "done": sum(t.get("status") == "done" for t in tk),
             "high": sum(p.get("priority") == "high" for p in state["projects"]),
@@ -681,25 +1368,50 @@ def _bg_css() -> str:
              "body::before{content:'';position:fixed;inset:0;z-index:0;background-size:cover;"
              "background-position:center bottom;background-repeat:no-repeat;opacity:.9;"
              "pointer-events:none;transition:opacity .45s ease}",
-             "body.bg-none::before{opacity:0}",
-             # 炎金/紫炎の写真背景は phoenix テーマ専用（他テーマは自前のグラデ背景）
-             "body:not(.th-phoenix)::before{opacity:0!important}"]
+             "body.bg-none::before{opacity:0}"]
+    # 黒フェニックス専用: 炎金/紫炎の写真背景（既存のまま・不変）。bg-d/bg-b クラスで切替。
     for cls, fn in (("bg-d", BG_D), ("bg-b", BG_B)):
         if fn.exists():
             b64 = base64.b64encode(fn.read_bytes()).decode("ascii")
             rules.append(f"body.{cls}::before{{background-image:url(data:image/jpeg;base64,{b64})}}")
+    # 各テーマ専用の Canva 背景（黒フェニックス以外の7テーマ）。bg-d/bg-b の後に出して確実に上書き
+    # ＝他テーマに炎金写真が漏れず、それぞれ自分の世界観の背景を ::before に敷く。CSP自己完結=data URI。
+    for cls, (fn, op) in THEME_BG_IMG.items():
+        if fn.exists():
+            b64 = base64.b64encode(fn.read_bytes()).decode("ascii")
+            rules.append(f"body.{cls}::before{{background-image:url(data:image/jpeg;base64,{b64})"
+                         f"!important;opacity:{op}!important}}")
     rules.append("</style>")
     return "".join(rules)
 
 
 def _brand_html() -> str:
-    # Embed the phoenix logo as a base64 data-URI so it works both via the server (which
-    # returns the dashboard HTML for every path) and as a standalone file:// open. Self-contained.
-    tx = '<span class="brandtx">Cockpit</span>'   # 非phoenixテーマ／ロゴ欠落時のテキストブランド（CSSで切替）
-    if LOGO.exists():
+    # 全テーマで左上に「Cockpit」画像ロゴを表示。背景画像は _brand_css がテーマ毎に data URI で切替
+    # （applyTheme のクラス付替でリロードなしに切替）。brandtx は sr-only でアクセシブル名「Cockpit」を維持。
+    return ('<div class="brandlogo" role="img" aria-label="Cockpit"></div>'
+            '<span class="brandtx">Cockpit</span>')
+
+
+def _brand_css() -> str:
+    """左上ブランドロゴのテーマ別背景画像（自己完結=data URI）。既存の Canvaタイル画像を流用し新規画像はゼロ。
+    黒フェニックス=実ロゴ png（CSS変数で1回だけ埋込・picker の .thlogo と共有）／他7テーマ=THEME_TILE_IMG の jpeg。"""
+    rules = ["<style>"]
+    have_logo = LOGO.exists()
+    if have_logo:
         b64 = base64.b64encode(LOGO.read_bytes()).decode("ascii")
-        return f'<img class="brandlogo" alt="Cockpit" src="data:image/png;base64,{b64}">' + tx
-    return tx
+        # png は :root の変数に1回だけ埋め込み、picker(.thlogo) と brand(.brandlogo) で共有（肥大回避）。
+        rules.append(f':root{{--logo-png:url("data:image/png;base64,{b64}")}}')
+        rules.append(".brandlogo{background-image:var(--logo-png)}")   # 既定=黒フェニックス
+    # 他7テーマ: pickerと同じ Canva タイル画像を左上ロゴにも流用。
+    for cls, fn in THEME_TILE_IMG.items():
+        if fn.exists():
+            b64 = base64.b64encode(fn.read_bytes()).decode("ascii")
+            rules.append(f'body.{cls} .brandlogo{{background-image:url("data:image/jpeg;base64,{b64}")}}')
+    if not have_logo:
+        # ロゴ画像が無い環境ではテキストブランドを表示（sr-only 解除）。
+        rules.append(".brandtx{position:static;width:auto;height:auto;margin:0;clip:auto;overflow:visible;font-weight:800;font-size:20px}")
+    rules.append("</style>")
+    return "".join(rules)
 
 
 # ===== H3: 🌱 種床（moc-0）— ブリーフ等から1クリックでアイデアを起票 =====
@@ -776,6 +1488,89 @@ def request_detail(tid):
 FEEDS_DIR = HERE / "feeds"      # gitignore対象（私物）。無ければ機能ごと沈黙＝OSSコアは汎用のまま
 
 
+# ===== S2: AIカーソル（差分読み）— design-sync-diff-architecture.md §3.2/§4 =====
+# events.jsonl（全mutationの追記journal）を「変更ストリーム」として使い、AIが「前回見た地点
+# (カーソル)以降の差分」だけを行オフセットで読む＝欠陥B（AIが差分を持たない）の解消。
+# カーソルは feeds/ai_cursor.json（私物・gitignore）に {"seen": <既読行数>} で持つ。
+# feeds/ が無ければ機能OFF＝OSSコアは no-op（feeds私物依存はガード・汎用のまま）。
+CURSOR = FEEDS_DIR / "ai_cursor.json"
+
+
+def read_journal_lines(path) -> list:
+    """journal の非空行を順序どおりに返す（ファイル欠如なら空）。"""
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def read_cursor(cursor_path) -> int:
+    """既読行数(seen)を返す。ファイル欠如/破損時は 0（初期化＝全部が差分・クラッシュしない）。"""
+    p = Path(cursor_path)
+    if not p.exists():
+        return 0
+    try:
+        return int(json.loads(p.read_text(encoding="utf-8")).get("seen", 0))
+    except (ValueError, OSError):
+        return 0
+
+
+def write_cursor(cursor_path, seen: int) -> bool:
+    """カーソルを保存。親(feeds/)が無ければ何もしない no-op＝OSSコアは汎用。戻り値=書けたか。"""
+    p = Path(cursor_path)
+    if not p.parent.exists():
+        return False
+    p.write_text(json.dumps({"seen": int(seen)}, ensure_ascii=False), encoding="utf-8")
+    return True
+
+
+def cursor_diff(journal_path, cursor_path):
+    """カーソル以降の journal イベントを返す。カーソルは動かさない（覗くだけ）。
+    戻り値 (events, seen, total):
+      events = 既読行以降の新着イベント（パース済み・順序保存）
+      seen   = 既読行数（起点カーソル）  total = journal 総行数
+    journal が縮小/ローテートして seen>total の時は取りこぼさぬよう 0 起点に戻す。
+    """
+    lines = read_journal_lines(journal_path)
+    total = len(lines)
+    seen = read_cursor(cursor_path)
+    if seen > total:
+        seen = 0
+    events = []
+    for ln in lines[seen:]:
+        try:
+            events.append(json.loads(ln))
+        except json.JSONDecodeError:
+            continue
+    return events, seen, total
+
+
+def render_diff_event(ev: dict) -> str:
+    """1イベントを人が読める1行に（op・tid・要点フィールド）。"""
+    ts = ev.get("ts", "")
+    op = ev.get("op", "?")
+    head = f"{ts}  {op:>13}"
+    tid = ev.get("tid")
+    if tid:
+        head += f"  {tid}"
+    extra = [f"{k}={ev[k]}" for k in ("to", "owner", "group", "phase", "pid", "gid", "src",
+             "why", "evidence", "req") if ev.get(k) not in (None, "")]
+    if extra:
+        head += "  (" + ", ".join(extra) + ")"
+    return head
+
+
+def render_diff(events, seen: int, total: int, feeds_on: bool = True) -> str:
+    """diff の人間可読出力。feeds/欠如(feeds_on=False)は no-op を告知。"""
+    if not feeds_on:
+        return "（feeds/ 未配置のため AIカーソルは無効＝no-op。OSSコアは差分読みを持ちません）"
+    if not events:
+        return f"✅ 差分なし（最新まで既読・全{total}件）"
+    out = [f"📥 前回から {len(events)} 件（既読 {seen} → 最新 {total}）:"]
+    out += ["  " + render_diff_event(ev) for ev in events]
+    return "\n".join(out)
+
+
 def _load_feed(feed_id: str):
     p = FEEDS_DIR / f"{feed_id}.json"
     if not p.exists():
@@ -797,6 +1592,50 @@ def refresh_feeds() -> list:
         if r.returncode != 0:
             failed.append(script.name)
     return failed
+
+
+def _pulse_momentum_html() -> str:
+    """momentum帯の「今週done（先週比）」セグメント。feeds無し（OSS素）なら沈黙。"""
+    feed = _load_feed("pulse")
+    if not feed:
+        return ""
+    t = feed["total"]
+    diff = t["done7"] - t["done_prev7"]
+    arrow = f'▲+{diff}' if diff > 0 else (f'▼{diff}' if diff < 0 else '±0')
+    return (f'<div class="sep"></div><div><div class="big">{t["done7"]} <small style="font-size:13px">{arrow}</small></div>'
+            f'<div class="lbl">done this week</div></div>')
+
+
+def _feed_pulse_html() -> str:
+    """🛰 進捗パルス（P1導出計器）: velocity・burnup・休眠を journal から導出して表示。
+    手で維持するメタデータ（milestone等）が腐る問題への答え＝記入ゼロで動く計器。
+    人間は進捗を「状態」でなく「変化」で知覚する — 今週の動きを一等地に出す。"""
+    feed = _load_feed("pulse")
+    if not feed:
+        return ""
+    e = html.escape
+    t = feed["total"]
+    diff = t["done7"] - t["done_prev7"]
+    arrow = f'▲+{diff}' if diff > 0 else (f'▼{diff}' if diff < 0 else '±0')
+    rows = []
+    for p in feed["projects"][:8]:   # 今週動いた順。動きゼロの羅列はしない（ダークコックピット）
+        if p["done7"] + p["added7"] == 0:
+            continue
+        rows.append(
+            f'<div class="pulserow"><span class="pulsename">[{e(p["pid"])}] {e(p["name"])}</span>'
+            f'<span class="pulsenum">✅{p["done7"]} ➕{p["added7"]}</span>'
+            f'{p.get("svg", "")}'
+            f'<span class="hint">{p["quiet_days"]}日前</span></div>')
+    quiet = [q for q in feed["dormant"]]
+    quiet_html = ""
+    if quiet:
+        parts = [f'{e(q["pid"])} {"記録なし" if q["quiet_days"] is None else str(q["quiet_days"]) + "日"}'
+                 for q in quiet[:10]]
+        quiet_html = f'<div class="hint" style="margin-top:6px">😴 静か: {" ・ ".join(parts)}</div>'
+    return (f'<div class="sectitle">🛰 進捗パルス — 今週 done <b>{t["done7"]}</b>（先週比 {arrow}）・'
+            f'追加 {t["added7"]} <span class="hint">（journalから自動導出・記録開始 {e(feed["journal_start"])}）</span></div>'
+            f'<div class="pulsecard">{"".join(rows) or "<div class=hint>今週はまだ動きがありません</div>"}'
+            f'{quiet_html}</div>')
 
 
 def _feed_pr_html(served: bool) -> str:
@@ -859,12 +1698,102 @@ def _feed_brief_html(served: bool) -> str:
             f'<div class="apr-wrap">{"".join(rows)}</div>')
 
 
+def _feed_evals_html() -> str:
+    """✅ 品質チップ列（F4・H4）: 各MOCの検証スイート集計＋鮮度。計測は evals_feed.py run（明示のみ）。"""
+    feed = _load_feed("evals")
+    if not feed or not feed.get("items"):
+        return ""
+    e = html.escape
+    chips = []
+    for it in feed["items"]:
+        icon = "⏭" if it.get("skipped") else ("✅" if it.get("ok") else "❌")
+        cls = "skip" if it.get("skipped") else ("ok" if it.get("ok") else "ng")
+        score = f' <b>{e(it["score"])}</b>' if it.get("score") else ""
+        tip = e(it.get("detail", ""))
+        chips.append(f'<span class="evalchip {cls}" title="{tip}">{icon} {e(it["name"])}{score}</span>')
+    fresh = f'<span class="hint">as of {e(feed["generated"])} · 再計測: <code>python3 feeds/evals_feed.py run</code></span>' \
+        if feed.get("generated") else ""
+    return (f'<div class="sectitle">✅ 品質 — Evals横断 {fresh}</div>'
+            f'<div class="evalsbar">{"".join(chips)}</div>')
+
+
+def find_tasks(state, keyword: str, group=None):
+    """done-lookupプリミティブ: 全プロジェクトの全タスク（done含む）を横断検索。
+    snapshot は done を載せない＝『既に済んだか』に答えられない穴を、この関数が塞ぐ。
+    group 指定時はそのグループのタスクだけに絞る（後方互換＝group=None で従来通り全件）。"""
+    k = keyword.lower()
+    hits = []
+    for p in state["projects"]:
+        for t in p.get("tasks", []):
+            if group is not None and (t.get("group") or None) != group:
+                continue
+            blob = (t.get("desc", "") + t.get("detail", "") + t.get("why", "")).lower()
+            if k in blob:
+                hits.append({"pid": p["id"], "id": t["id"], "status": t.get("status"),
+                             "owner": t.get("owner"), "desc": t.get("desc", ""),
+                             "group": t.get("group")})
+    return hits
+
+
+def _feed_drift_html() -> str:
+    """🔄 同期係カード（ドリフト検出）: MOCカードと台帳の乖離を提案として出す。書き込みはしない。"""
+    feed = _load_feed("drift")
+    if not feed or not feed.get("items"):
+        return ""
+    e = html.escape
+    rows = []
+    for it in feed["items"]:
+        if it["kind"] == "dangling":
+            msg = f'カードが存在しないタスク <b>{e(it["task"])}</b> を参照（参照切れ）'
+        else:
+            msg = (f'<b>{e(it["task"])}</b> は台帳で <b>{e(str(it.get("ledger_status")))}</b> '
+                   f'なのにカードは未チェック → <code>[x]</code> 化を提案')
+        rows.append(f'<div class="apr"><div>[{e(it["pid"])}] {msg}<br>'
+                    f'<span class="hint">カード「{e(it["card"][:60])}」</span></div></div>')
+    return (f'<div class="sectitle">🔄 同期係 — カード⇄台帳の乖離 {len(feed["items"])}件 '
+            f'<span class="hint">（提案のみ・確定は人間）</span></div>'
+            f'<div class="apr-wrap">{"".join(rows)}</div>')
+
+
+def _feed_surprises_html() -> str:
+    """💡 想定外の発見（F4・H4）: flow/surprises.md の最新3件。忘れない・週次棚卸しの入口。"""
+    feed = _load_feed("surprises")
+    if not feed or not feed.get("items"):
+        return ""
+    e = html.escape
+    rows = []
+    for it in feed["items"]:
+        tx = it["text"]
+        tx = tx[:180] + "…" if len(tx) > 180 else tx
+        rows.append(f'<div class="ti"><span class="hint">{e(it["date"])}</span> {e(tx)}</div>')
+    return (f'<div class="sectitle">💡 最近の想定外（surprises・全{feed.get("total","?")}件）</div>'
+            f'<div class="kblock" style="font-size:13px">{"".join(rows)}</div>')
+
+
+def _links_html(path=None) -> str:
+    """🔗 外部ツールリンク集（F3・H4）: integrations.local.toml の [links] をサイドバーに。
+    ファイルが無ければ空文字＝OSSコアは沈黙（私物配線はgitignore対象のtomlに隔離）。"""
+    p = Path(path) if path else (HERE / "integrations.local.toml")
+    if not p.exists():
+        return ""
+    try:
+        import tomllib
+        links = tomllib.loads(p.read_text(encoding="utf-8")).get("links", {})
+    except Exception:
+        return ""
+    if not links:
+        return ""
+    a = "".join(f'<a href="{html.escape(u)}" target="_blank" rel="noopener">{html.escape(l)}</a>'
+                for l, u in links.items())
+    return f'<div class="extlinks">{a}</div>'
+
+
 def _why_html(t) -> str:   # 承認カードに propose の根拠(--why)を表示（C3・HITLの判断材料）
     w = t.get("why")
     return f'<br><span class="hint">💬 {html.escape(w)}</span>' if w else ""
 
 
-def render_dashboard(state, served=False, active="now") -> str:
+def render_dashboard(state, served=False, active="now", flash="") -> str:
     e = html.escape
     s = _dash_stats(state)
     sp = _sorted_projects(state)
@@ -895,7 +1824,15 @@ def render_dashboard(state, served=False, active="now") -> str:
                        f'<input type="hidden" name="pid" value="{p["id"]}"><input type="hidden" name="idx" value="{i}">'
                        f'<input type="hidden" name="status" value="done"><input type="hidden" name="pg" value="projects">'
                        f'<button class="btn ph">✅ Complete phase</button></form>')
-            out.append(f'<div class="jstep {cls}">{mark} {e(ph.get("name",""))} — {e(ph.get("goal",""))}{here}{btn}</div>')
+            elif served and i == cur - 1:   # 直近の完了Phaseだけ「↺ todo」で1段戻せる（誤操作の即リカバリ）
+                btn = (f'<form class="act-f" method="post" action="/set-phase">'
+                       f'<input type="hidden" name="pid" value="{p["id"]}"><input type="hidden" name="idx" value="{i}">'
+                       f'<input type="hidden" name="status" value="todo"><input type="hidden" name="pg" value="projects">'
+                       f'<button class="btn" title="このPhaseを未完に戻す">↺ todo</button></form>')
+            # P5: phaseにgroupが紐づいていれば、タスク由来の進捗（正直な物差し）を添える
+            ptp = _phase_task_progress(p, ph)
+            pt = f' <span class="hint">· {ptp[0]}/{ptp[1]} tasks</span>' if ptp else ""
+            out.append(f'<div class="jstep {cls}">{mark} {e(ph.get("name",""))} — {e(ph.get("goal",""))}{pt}{here}{btn}</div>')
         out.append(f'<div class="jgoal">🏁 Goal: {e(p.get("done_def",""))}</div>')
         return "".join(out)
 
@@ -910,15 +1847,23 @@ def render_dashboard(state, served=False, active="now") -> str:
         due = (f"🚨 {days_over}d OVERDUE · {nd}" if overdue else f"⏰ {nd}") if nd else "no due date"
         curlabel = f"{cur}/{tot} done"
         curgoal = phs[cur]["goal"] if cur < len(phs) else "(all phases done)"
-        def trow(t):
+        def trow(t, n):
             b = ""
             if served and t.get("status") == "todo":
                 b = (f'<form class="act-f" method="post" action="/set-status">'
                      f'<input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="status" value="done">'
                      f'<input type="hidden" name="pg" value="projects"><button class="btn">Done</button></form>')
-            return (f'<div class="ti">[{t.get("status")}] {e(t["id"])}: {e(t["desc"])} '
-                    f'{"🤖" if t.get("owner")=="ai" else "👤"} {b}</div>')
-        ti = "".join(trow(t) for t in p.get("tasks", []))
+            rb = (f'<div class="hint" style="margin-left:14px">💬 {e(t["readback"]["text"])} '
+                  f'<span style="opacity:.6">({e(t["readback"].get("at",""))} AI復唱)</span></div>'
+                  if t.get("readback") else "")
+            return (f'<div class="ti">{n}. [{t.get("status")}] {e(t["id"])}: {e(t["desc"])} '
+                    f'{"🤖" if t.get("owner")=="ai" else "👤"} {b}</div>{rb}')
+        # group 見出し（表示名＋件数）→ 番号付きタスク。groups[].order 順・未定義末尾・未分類は最後（§3.1）。
+        tparts = []
+        for g in group_tasks(p):
+            tparts.append(f'<div class="tgrp">{e(g["name"])} <span class="cnt">{len(g["tasks"])}件</span></div>')
+            tparts += [trow(t, i) for i, t in enumerate(g["tasks"], 1)]
+        ti = "".join(tparts)
         msx = ", ".join(f'{e(m["name"])}({m.get("due","")})' for m in p.get("milestones", [])) or "none"
         deps = ", ".join(p.get("depends_on", [])) or "none"
         pv_html = f'<div class="pv">{e(p["overview"])}</div>' if p.get("overview") else ""
@@ -938,7 +1883,12 @@ def render_dashboard(state, served=False, active="now") -> str:
                 f'<div class="ato">Next: {e(curgoal)} ({max(tot - cur, 0)} phase(s) left)</div>'
                 f'<div class="tl"><b>Tasks</b>{ti}</div>'
                 f'{docs_html}'
-                f'<div class="meta">📅 {msx} · deps: {e(deps)}</div></div></div>')
+                f'<div class="meta">📅 {msx} · deps: {e(deps)}</div>'
+                + (f'<form class="act-f" method="post" action="/set-mode" onclick="event.stopPropagation()">'
+                   f'<input type="hidden" name="pid" value="{p["id"]}"><input type="hidden" name="mode" value="parked">'
+                   f'<input type="hidden" name="pg" value="projects">'
+                   f'<button class="btn" title="いま動かさないと決める（警報対象外になる・[▶ 再開]で戻せる）">🅿 駐機する</button></form>' if served else "")
+                + '</div></div>')
 
     def doc_chips(p):
         chips = []
@@ -955,6 +1905,8 @@ def render_dashboard(state, served=False, active="now") -> str:
         o = [f'<div class="mhead">🔥 {e(p["name"])} <span class="id">{p["id"]}</span></div>']
         if nt:
             o.append(f'<div class="nd-sec">👉 NEXT TASK</div><div class="nd-body"><b>{e(nt["id"])}</b>: {e(nt["desc"])}</div>')
+            if nt.get("readback"):   # 💬 AIの復唱（read-back）: 王が一瞥して解釈ズレを止める
+                o.append(f'<div class="nd-body">💬 AIの解釈: {e(nt["readback"]["text"])}</div>')
         else:
             o.append('<div class="nd-body">(no open task — add one or advance the phase)</div>')
         o.append(f'<div class="nd-sec">🔥 WHY NOW</div><div class="nd-body">{e(" / ".join(why)) or "focused"}</div>')
@@ -1023,7 +1975,7 @@ def render_dashboard(state, served=False, active="now") -> str:
     else:
         stale_html = ""
 
-    # ⏱ タイムライン（C2・journal最新5件）: 何がいつ起きたか（MAMORIで実証した安心パターン）
+    # ⏱ タイムライン（C2・journal最新5件）: 何がいつ起きたかを見せる安心パターン
     ev = []
     if JOURNAL.exists():
         for line in JOURNAL.read_text(encoding="utf-8").splitlines()[-5:]:
@@ -1047,8 +1999,61 @@ def render_dashboard(state, served=False, active="now") -> str:
                 '<code>python3 cockpit.py add-project proj-1 "My first project" "The goal" high</code><br>'
                 'then add a phase: <code>python3 cockpit.py add-phase proj-1 "Phase 0" "first milestone"</code></div></div>')
     else:
-        nows = "".join(nowcard(p) for p in sp if near_term(p)) or '<div class="nowcard"><div class="act">Nothing due soon</div></div>'
-    cards = "".join(card(p) for p in sp) or '<div class="apr-empty">No projects yet — run <code>add-project</code>.</div>'
+        # parked は due が近くても Focus に出さない（意図した眠りに警報を鳴らさない＝ダークコックピット）
+        nows = "".join(nowcard(p) for p in sp if near_term(p) and not is_parked(p)) or '<div class="nowcard"><div class="act">Nothing due soon</div></div>'
+    # 🅿 WIPの明示（consult v3 P2）: activeだけフルカード、parkedは1行に畳む＝「14枚の壁」を崩す。
+    # 人間の並行限界（Personal Kanban: WIP 2-3）を超えた等圧表示は「全部見える＝何も見えない」。
+    sp_active = [p for p in sp if not is_parked(p)]
+    sp_parked = [p for p in sp if is_parked(p)]
+    cards = "".join(card(p) for p in sp_active) or '<div class="apr-empty">No projects yet — run <code>add-project</code>.</div>'
+
+    def parkedrow(p):
+        open_n = len(_todos(p))
+        btn = ""
+        if served:
+            btn = (f'<form class="act-f" method="post" action="/set-mode">'
+                   f'<input type="hidden" name="pid" value="{p["id"]}"><input type="hidden" name="mode" value="active">'
+                   f'<input type="hidden" name="pg" value="projects"><button class="btn">▶ 再開</button></form>')
+        return (f'<div class="parkedrow"><span class="nm">🅿 {e(p["name"])}</span>'
+                f'<span class="id">{p["id"]}</span><span class="hint">todo {open_n}件</span>{btn}</div>')
+
+    parked_html = ""
+    if sp_parked:
+        parked_html = (f'<div class="sectitle" style="margin-top:18px">🅿 Parked — 意図して眠らせている {len(sp_parked)}件 '
+                       f'<span class="hint">（警報対象外・[▶ 再開]で戻す）</span></div>'
+                       f'<div class="parkedwrap">{"".join(parkedrow(p) for p in sp_parked)}</div>')
+
+    # 🚨 逸脱ファースト（P3 ダークコックピット）: 腐った約束だけが最上段で光り、
+    # [直す/捨てる]の2択に追い込む。逸脱ゼロならこのカードは存在しない＝静か＝順調。
+    def devrow(d):
+        btns = ""
+        if served and d["kind"] == "milestone":
+            btns = (f'<form class="act-f" method="post" action="/ms-defer" onclick="event.stopPropagation()">'
+                    f'<input type="hidden" name="pid" value="{d["pid"]}"><input type="hidden" name="name" value="{e(d["name"])}">'
+                    f'<input type="hidden" name="due" value="{d["due"]}"><input type="hidden" name="pg" value="now">'
+                    f'<button class="btn" title="dueを今日+2週に引き直す">⏰ +2週に延期</button></form>'
+                    f'<form class="act-f" method="post" action="/ms-drop" onclick="event.stopPropagation()">'
+                    f'<input type="hidden" name="pid" value="{d["pid"]}"><input type="hidden" name="name" value="{e(d["name"])}">'
+                    f'<input type="hidden" name="due" value="{d["due"]}"><input type="hidden" name="pg" value="now">'
+                    f'<button class="btn" title="約束を取り下げる（履歴は残る）">🗑 取り下げ</button></form>')
+        elif served:   # focus失効
+            btns = (f'<form class="act-f" method="post" action="/focus-extend" onclick="event.stopPropagation()">'
+                    f'<input type="hidden" name="pid" value="{d["pid"]}"><input type="hidden" name="pg" value="now">'
+                    f'<button class="btn">🔥 +3日 再点火</button></form>'
+                    f'<form class="act-f" method="post" action="/focus-clear" onclick="event.stopPropagation()">'
+                    f'<input type="hidden" name="pid" value="{d["pid"]}"><input type="hidden" name="pg" value="now">'
+                    f'<button class="btn">解除</button></form>')
+        icon = "📅" if d["kind"] == "milestone" else "🔥"
+        return (f'<div class="devrow"><span class="devname">{icon} [{e(d["pid"])}] {e(d["name"])}</span>'
+                f'<span class="devdays">{d["days"]}日超過</span>'
+                f'<span class="hint">due {e(d["due"])}</span>{btns}</div>')
+
+    devs = _deviations(state, today)
+    dev_html = ""
+    if devs:
+        dev_html = (f'<div class="devcard"><div class="devtitle">🚨 逸脱 — 再交渉が必要な約束 {len(devs)}件 '
+                    f'<span class="hint">（直すか・捨てるか。放置は計器を腐らせる）</span></div>'
+                    f'{"".join(devrow(d) for d in devs)}</div>')
     appr = [(p, t) for p in sp for t in p.get("tasks", []) if t.get("status") == "proposed"]
     if served:
         appr_items = "".join(
@@ -1064,6 +2069,30 @@ def render_dashboard(state, served=False, active="now") -> str:
             f'{_why_html(t)}</div>'
             f'<code class="cmd" title="click to copy" onclick="copyCmd(this)" data-cmd="python3 cockpit.py approve {t["id"]}">cockpit.py approve {t["id"]}</code></div>' for p, t in appr
         ) or '<div class="apr-empty">Nothing to approve 🎉</div>'
+
+    # ✅🕓 完了の確認（done-proposed）: AIが検証済み実装を「完了確認待ち」に置いた行。作成の承認と対称の"完了側"。
+    # 🤖（AI作業所有）と "✅完了確認待ち" バッジを視覚的に区別（王FB: 混同を避ける）。
+    donep = [(p, t) for p in sp for t in p.get("tasks", []) if t.get("done_proposed")]
+
+    def _dp_evidence(t):
+        ev = (t.get("done_proposed") or {}).get("evidence", "")
+        return f'<br><span class="hint">🔎 証跡: {e(ev)}</span>' if ev else ""
+    if served:
+        donep_items = "".join(
+            f'<div class="apr donep"><div><span class="dpbadge">✅🕓 完了確認待ち</span> '
+            f'<b>{e(p["name"])}</b> <span class="id">{p["id"]}</span> <span class="id">{e(t["id"])}</span><br>{e(t["desc"])}'
+            f'{_dp_evidence(t)}</div><div>'
+            f'<form class="act-f" method="post" action="/confirm-done"><input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="pg" value="approve"><button class="btn ok">✅ 完了を確認</button></form>'
+            f'<form class="act-f" method="post" action="/reject-done"><input type="hidden" name="tid" value="{t["id"]}"><input type="hidden" name="pg" value="approve"><button class="btn no">↩ 差し戻し</button></form>'
+            f'</div></div>' for p, t in donep
+        ) or '<div class="apr-empty">完了確認待ちはありません 🎉</div>'
+    else:
+        donep_items = "".join(
+            f'<div class="apr donep"><div><span class="dpbadge">✅🕓 完了確認待ち</span> '
+            f'<b>{e(p["name"])}</b> <span class="id">{p["id"]}</span> <span class="id">{e(t["id"])}</span><br>{e(t["desc"])}'
+            f'{_dp_evidence(t)}</div>'
+            f'<code class="cmd" title="click to copy" onclick="copyCmd(this)" data-cmd="python3 cockpit.py confirm-done {t["id"]}">cockpit.py confirm-done {t["id"]}</code></div>' for p, t in donep
+        ) or '<div class="apr-empty">完了確認待ちはありません 🎉</div>'
 
     # "Your tasks" lane = human's turn (owner=human todos). A separate lane from AI-proposal approvals.
     work = [(p, t) for p in sp for t in p.get("tasks", []) if t.get("owner") == "human" and t.get("status") == "todo"]
@@ -1091,6 +2120,9 @@ def render_dashboard(state, served=False, active="now") -> str:
     else:
         work_items = '<div class="apr-empty">No tasks pending 🎉</div>'
     msg = f"{s['proposed']} awaiting your approval." if s["proposed"] else "Nothing to approve. Nice pace ✨"
+    # flash（軸1: 押下→即受領）が有れば momentum 帯に前面表示。無ければ既定文言（レイアウト不変）。
+    msg_html = (f'<div class="msg flash">{e(flash)}</div>' if flash
+                else f'<div class="msg">{e(msg)}</div>')
 
     # --- KPI page (facts derivable from state.json only) ---
     prio = {"high": 0, "mid": 0, "low": 0}
@@ -1137,10 +2169,14 @@ def render_dashboard(state, served=False, active="now") -> str:
         cmd('propose <pid> "task"', "agent proposes (awaiting approval)"),
         cmd("approve <tid>", "proposal -> todo"),
         cmd("reject <tid>", "proposal -> dropped"),
+        cmd('propose-done <tid> "evidence"', "agent: mark verified work done-proposed"),
+        cmd("confirm-done <tid>", "you: confirm completion -> done"),
+        cmd("reject-done <tid>", "you: send a done-proposal back (still open)"),
         cmd("set-status <tid> done|skip|dropped", "change a task"),
         cmd("set-phase <pid> <n> done", "advance the Journey"),
         cmd("set-priority <pid> high|mid|low", "re-rank"),
         cmd("focus <pid> [days]", "mark hot (unfocus to clear)"),
+        cmd("diff [--advance]", "changes since the AI cursor (--advance marks read)"),
         cmd("validate", "check the ledger"),
     ])
     set_html = (
@@ -1155,39 +2191,55 @@ def render_dashboard(state, served=False, active="now") -> str:
         'Render eval: <code>python3 eval_dashboard.py</code> (invariants)<br>'
         '1-click approve: run <code>python3 cockpit.py serve</code> (local server)</div>')
 
-    appr_badge = f" ({s['proposed']})" if s["proposed"] else ""   # badge = approvals only (the thing blocking the agent)
+    # badge = 王を待たせている件数（承認待ち + 完了確認待ち）。どちらも王のワンクリックで前進する。
+    pending_n = s["proposed"] + len(donep)
+    appr_badge = f" ({pending_n})" if pending_n else ""
     # one-step Undo (server only): reverts the last approve/reject/done/phase change via the auto-backup
     undo_btn = (f'<form class="undo-f" method="post" action="/undo">'
                 f'<input type="hidden" name="pg" value="{active}">'
                 f'<button class="undobtn" title="直前の承認 / 不可 / Done / フェーズ変更を取り消す">↩ Undo</button></form>') if served else ""
     head = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Cockpit Dashboard</title>' + DASH_CSS + _bg_css() + "</head>")
-    body = (f'<body class="bg-d th-phoenix">{_embers_html()}<div class="wrap">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Cockpit Dashboard</title>' + DASH_CSS + _bg_css() + _brand_css() + (_raven.RAVEN_CSS if _raven else "") + "</head>")
+    body = (f'<body class="bg-d th-phoenix">{_embers_html()}{_fx_html()}<div class="wrap">'
             f'<aside class="side"><div class="brand">{_brand_html()}</div><nav class="nav">'
             f'<a class="{"active" if active=="now" else ""}" data-pg="now" href="#">🔥 Now</a>'
             f'<a class="{"active" if active=="projects" else ""}" data-pg="projects" href="#">📋 Projects</a>'
             f'<a class="{"active" if active=="approve" else ""}" data-pg="approve" href="#">🙋 Your turn{appr_badge}</a>'
+            f'<a class="{"active" if active=="syllabus" else ""}" data-pg="syllabus" href="#">📚 シラバス</a>'
+            f'<a class="{"active" if active=="problems" else ""}" data-pg="problems" href="#">📝 問題集</a>'
             f'<a class="{"active" if active=="settings" else ""}" data-pg="settings" href="#">⚙️ Settings</a></nav>'
-            f'<button class="thbtn" onclick="cycleTheme()">👕 テーマ: <span id="thlabel">{THEMES[0][1]}</span></button>'
+            f'{_links_html()}'
+            f'<button class="thbtn" onclick="toggleThGrid()">👕 テーマ: <span id="thlabel">{THEMES[0][1]}</span></button>'
+            f'{_theme_tiles_html()}'
             f'<button class="bgbtn" onclick="cycleBg()">🎨 背景: <span id="bglabel">D 炎金</span></button></aside>'
-            f'<main class="main"><div class="head"><div><h1>Good morning 👋</h1>'
-            f'<div class="date">{date.today()} · {s["projects"]} projects active</div></div>{undo_btn}</div>'
+            f'<main class="main"><div class="head"><div><h1><span id="greet">Good morning</span> <span class="wave">👋</span></h1>'
+            f'<div class="date">{date.today()} · {s["active_n"]} active / {s["parked_n"]} parked</div></div>{undo_btn}</div>'
             f'<section class="page{" active" if active=="now" else ""}" id="pg-now"><div class="momentum">'
-            f'<div><div class="big">{s["projects"]}</div><div class="lbl">projects</div></div><div class="sep"></div>'
+            f'<div><div class="big">{s["active_n"]}</div><div class="lbl">active · {s["parked_n"]} parked</div></div><div class="sep"></div>'
+            f'{"<div><div class=\"lbl\" style=\"color:#c0392b;font-weight:700\">⚠ WIP " + str(s["active_n"]) + " — 同時に動かすのは3つまでが目安</div></div><div class=\"sep\"></div>" if s["active_n"] > 3 else ""}'
             f'<div><div class="big">{s["todo"]}</div><div class="lbl">todo</div></div><div class="sep"></div>'
             f'<div><div class="big">{s["done"]}</div><div class="lbl">done</div></div><div class="sep"></div>'
             f'<div><div class="big">{s["high"]}</div><div class="lbl">high prio</div></div><div class="sep"></div>'
             f'<div><div class="big">{s["proposed"]}</div><div class="lbl">to approve</div></div>'
-            f'<div class="msg">{e(msg)}</div></div>'
+            f'{_pulse_momentum_html()}'
+            f'{msg_html}</div>'
+            f'{dev_html}'
+            f'{_raven.render_now_card(served) if _raven else ""}'
             f'<div class="sectitle">🔥 Focus (next ~3 days)</div><div class="now">{nows}</div>'
-            f'{_feed_pr_html(served)}{_feed_brief_html(served)}{stale_html}{timeline_html}</section>'
+            f'{_feed_pulse_html()}{_feed_pr_html(served)}{_feed_brief_html(served)}{_feed_drift_html()}{_feed_evals_html()}{_feed_surprises_html()}{stale_html}{timeline_html}</section>'
             f'<section class="page{" active" if active=="projects" else ""}" id="pg-projects">'
-            f'<div class="sectitle">📋 All projects (by priority)</div><div class="grid">{cards}</div></section>'
+            f'<div class="sectitle">📋 Active projects (by priority)</div><div class="grid">{cards}</div>{parked_html}</section>'
             f'<section class="page{" active" if active=="approve" else ""}" id="pg-approve">'
+            f'<div class="sectitle">✅ 完了の確認（AIが実装完了・確認待ち → ワンクリックで done）</div>'
+            f'<div class="apr-wrap">{donep_items}</div>'
             f'<div class="sectitle">🟡 Awaiting approval (AI proposals → approve to send to the agent)</div>'
             f'<div class="apr-wrap">{appr_items}</div>'
             f'<div class="sectitle">✅ Your tasks (human work → mark done to clear)</div>'
             f'<div class="apr-wrap">{work_items}</div></section>'
+            f'<section class="page{" active" if active=="syllabus" else ""}" id="pg-syllabus">'
+            f'{_raven.render_syllabus() if _raven else "<div class=\'hint\'>教育係(raven)が読み込めません</div>"}</section>'
+            f'<section class="page{" active" if active=="problems" else ""}" id="pg-problems">'
+            f'{_raven.render_problems() if _raven else ""}</section>'
             f'<section class="page{" active" if active=="settings" else ""}" id="pg-settings">{set_html}'
             f'<details class="setbox"><summary><b>📊 KPI &amp; metrics</b> <span class="hint">(rarely needed — click to expand)</span></summary>'
             f'<div style="margin-top:14px">{kpi_html}</div></details></section>'
@@ -1214,10 +2266,16 @@ def render_dashboard(state, served=False, active="now") -> str:
               # 着せ替えテーマ切替（localStorage。THEMES が単一の正）
               f'var THS={json.dumps([c for c, _ in THEMES], ensure_ascii=False)},'
               f'THL={json.dumps(dict(THEMES), ensure_ascii=False)};'
-              'function applyTheme(c){THS.forEach(function(x){document.body.classList.remove(x)});document.body.classList.add(c);'
-              'var l=document.getElementById("thlabel");if(l)l.textContent=THL[c];try{localStorage.setItem("cockpit-theme",c)}catch(e){}}'
-              'var st=null;try{st=localStorage.getItem("cockpit-theme")}catch(e){}if(st&&THS.indexOf(st)>=0)applyTheme(st);'
+              'function applyTheme(c){if(THS.indexOf(c)<0)c="th-phoenix";THS.forEach(function(x){document.body.classList.remove(x)});document.body.classList.add(c);'
+              'var l=document.getElementById("thlabel");if(l)l.textContent=THL[c];'
+              'document.querySelectorAll(".thtile").forEach(function(t){t.classList.toggle("sel",t.dataset.th===c)});'
+              'try{localStorage.setItem("cockpit-theme",c)}catch(e){}}'
+              'function toggleThGrid(){var g=document.getElementById("thgrid");if(g)g.classList.toggle("open")}'
+              'var st="th-phoenix";try{st=localStorage.getItem("cockpit-theme")||"th-phoenix"}catch(e){}applyTheme(st);'
               'function cycleTheme(){var c="th-phoenix";try{c=localStorage.getItem("cockpit-theme")||"th-phoenix"}catch(e){}applyTheme(THS[(THS.indexOf(c)+1)%THS.length])}'
+              # 時刻対応の挨拶（ブラウザ現地時間・#greet のテキストのみ差し替え、👋 .wave span は保持）
+              'function setGreet(){var h=new Date().getHours(),g=document.getElementById("greet");if(!g)return;'
+              'g.textContent=h<5?"Good evening":h<12?"Good morning":h<18?"Good afternoon":"Good evening"}setGreet();'
               'var BGS=["bg-d","bg-b","bg-none"],BGL={"bg-d":"D 炎金","bg-b":"B 紫炎","bg-none":"OFF"};'
               'function applyBg(c){document.body.classList.remove("bg-d","bg-b","bg-none");document.body.classList.add(c);'
               'var l=document.getElementById("bglabel");if(l)l.textContent=BGL[c];try{localStorage.setItem("cockpit-bg",c)}catch(e){}}'
@@ -1242,6 +2300,14 @@ def render_dashboard(state, served=False, active="now") -> str:
 
 def main(argv):
     if not argv or argv[0] in ("snapshot", "snap"):
+        # snapshot [--group <g>]: --group 指定時は1グループのミニsnapshotを print（ファイルは更新しない・§3.2）
+        grp = None
+        if "--group" in argv:
+            i = argv.index("--group")
+            grp = argv[i + 1] if i + 1 < len(argv) else None
+        if grp:
+            st = load_state()
+            print(render_snapshot_md(make_snapshot(st, group=grp), st, group=grp)); return
         print(render_snapshot_md(emit_snapshot())); print(f"→ {SNAP_MD}"); return
     if argv[0] == "dashboard":
         failed = refresh_feeds()
@@ -1270,6 +2336,14 @@ def main(argv):
             print(add_phase(rest[0], rest[1], rest[2] if len(rest) > 2 else ""))
         elif cmd == "set-status":
             print(set_status(rest[0], rest[1]))
+        elif cmd == "set-mode":
+            print(set_mode(rest[0], rest[1]))
+        elif cmd == "set-phase-groups":
+            # set-phase-groups <pid> <idx> [g1,g2]  … phaseにgroupを紐づけ→進捗をタスクから導出（P5）
+            print(set_phase_groups(rest[0], rest[1], rest[2] if len(rest) > 2 else ""))
+        elif cmd == "readback":
+            # readback <tid> "解釈 or 最初の一手を1行"  … agent: 着手の復唱（ICAO read-back・P4）
+            print(readback(rest[0], rest[1]))
         elif cmd == "set-detail":
             print(set_detail(rest[0], rest[1]))
         elif cmd == "set-overview":
@@ -1277,19 +2351,59 @@ def main(argv):
         elif cmd == "add-doc":
             print(add_doc(rest[0], rest[1], rest[2]))
         elif cmd == "propose":
-            # propose <pid> <desc> [--why "根拠"]  … 承認判断の材料を残す（HITLの質・C3）
+            # propose <pid> <desc> [--why "根拠"] [--group <g>]  … 承認判断の材料を残す（HITLの質・C3）
             why = ""
             if "--why" in rest:
                 i = rest.index("--why")
                 why = rest[i + 1] if i + 1 < len(rest) else ""
                 rest = rest[:i] + rest[i + 2:]
-            print(propose(rest[0], rest[1], why=why))
+            grp = None
+            if "--group" in rest:
+                i = rest.index("--group")
+                grp = rest[i + 1] if i + 1 < len(rest) else None
+                rest = rest[:i] + rest[i + 2:]
+            print(propose(rest[0], rest[1], why=why, group=grp))
         elif cmd == "add":
-            print(add_task(rest[0], rest[1], rest[2] if len(rest) > 2 else None))
+            # add <pid> <desc> [prio] [--group <g>]
+            grp = None
+            if "--group" in rest:
+                i = rest.index("--group")
+                grp = rest[i + 1] if i + 1 < len(rest) else None
+                rest = rest[:i] + rest[i + 2:]
+            print(add_task(rest[0], rest[1], rest[2] if len(rest) > 2 else None, group=grp))
+        elif cmd == "set-group":
+            # set-group <tid> <group>  |  set-group <tid> --clear
+            grp = None if (len(rest) > 1 and rest[1] == "--clear") else (rest[1] if len(rest) > 1 else None)
+            print(set_group(rest[0], grp))
+        elif cmd == "set-owner":
+            # set-owner <tid> <ai|human>
+            print(set_owner(rest[0], rest[1]))
+        elif cmd == "add-group":
+            # add-group <pid> <id> "<name>" [order]
+            print(add_group(rest[0], rest[1], rest[2], rest[3] if len(rest) > 3 else None))
+        elif cmd == "group":
+            # group <g>: そのグループのタスクを一覧（find の group専用ショートカット）
+            g = rest[0] if rest else ""
+            hits = find_tasks(load_state(), "", group=g)
+            if not hits:
+                print(f"（グループ '{g}' にタスクなし）")
+            else:
+                print(f"# グループ '{g}'（{len(hits)}件）")
+                for h in hits:
+                    print(f"  [{h['pid']}] {h['id']} {h['status']}/{h['owner']}: {h['desc']}")
         elif cmd == "approve":
             print(approve(rest[0]))
         elif cmd == "reject":
             print(reject(rest[0]))
+        elif cmd == "propose-done":
+            # propose-done <tid> ["evidence"]  … agent: 検証済みタスクを「完了確認待ち」に（status不変・HITL）
+            print(propose_done(rest[0], rest[1] if len(rest) > 1 else ""))
+        elif cmd == "confirm-done":
+            # confirm-done <tid>  … human: 完了を確定（status=done＋マーカー消去）
+            print(confirm_done(rest[0]))
+        elif cmd == "reject-done":
+            # reject-done <tid>  … human: 差し戻し（マーカーのみ消去・タスクは残る）
+            print(reject_done(rest[0]))
         elif cmd == "now":
             print(now_view(rest[0] if rest else 3))
         elif cmd == "set-priority":
@@ -1306,6 +2420,20 @@ def main(argv):
             print(assign(rest[0], rest[1]))
         elif cmd == "request-detail":
             print(request_detail(rest[0]))
+        elif cmd == "find":
+            # done-lookup: 全タスク横断（done含む）。サブエージェントが「既に済んだか」を確認する用。
+            # find <kw> [--group <g>]: --group でそのグループだけに絞る（返却トークンを縮約・§4）。
+            grp = None
+            if "--group" in rest:
+                i = rest.index("--group")
+                grp = rest[i + 1] if i + 1 < len(rest) else None
+                rest = rest[:i] + rest[i + 2:]
+            hits = find_tasks(load_state(), rest[0] if rest else "", group=grp)
+            if not hits:
+                print(f"（'{rest[0] if rest else ''}' に一致するタスクなし{f' [group={grp}]' if grp else ''}）")
+            else:
+                for h in hits:
+                    print(f"  [{h['pid']}] {h['id']} {h['status']}/{h['owner']}: {h['desc']}")
         elif cmd == "stale":
             # 停滞（N日以上動いていない todo）を一覧。目的③「漏れゼロ」の計器。
             thr = int(rest[0]) if rest else STALE_THRESHOLD_DAYS
@@ -1317,6 +2445,19 @@ def main(argv):
                 print(f"⏳ 停滞タスク（{thr}日以上・{len(rows)}件）:")
                 for p, t in sorted(rows, key=lambda r: stale_days(r[1]) or 0, reverse=True):
                     print(f"  {stale_days(t)}日  [{p['id']}] {t['id']}: {t['desc']}")
+        elif cmd == "diff":
+            # diff [--advance]: AIカーソル以降の journal 差分を人が読める形で出力（§3.2/§4 S2）。
+            #   diff            … カーソル以降のイベントを覗く（カーソルは動かさない）
+            #   diff --advance  … 出力後にカーソルを最新へ進める（既読化）
+            # feeds/ が無ければ機能OFF＝no-op（OSSコアは汎用のまま・state.json には触れない）。
+            advance = "--advance" in rest
+            if not FEEDS_DIR.exists():
+                print(render_diff([], 0, 0, feeds_on=False)); return
+            events, seen, total = cursor_diff(JOURNAL, CURSOR)
+            print(render_diff(events, seen, total, feeds_on=True))
+            if advance and total != seen:
+                if write_cursor(CURSOR, total):
+                    print(f"→ カーソルを最新へ（既読 {total}件・以降が次の差分）")
         elif cmd == "validate":
             errs = validate(load_state())
             print("✅ valid" if not errs else f"❌ {len(errs)} error(s):\n" + "\n".join(errs))
